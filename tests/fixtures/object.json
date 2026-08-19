@@ -6,12 +6,16 @@
   "request_id": "synthetic-request-1",
   "endpoint": "/chat/completions",
   "status_code": 200,
-  "body": "{\"model\":\"synthetic-model\",\"interaction_type\":\"chat\",\"tool_calls\":[{\"function\":{\"name\":\"search\",\"arguments\":{\"prompt\":\"must-not-leak\"}}}],\"prompt\":\"must-not-leak\",\"output\":\"must-not-leak\"}",
+  "body": "{\"model\":\"synthetic-model\",\"interaction_type\":\"chat\",\"tool_calls\":[{\"function\":{\"name\":\"search\",\"arguments\":{\"prompt\":\"synthetic tool argument retained\"}}}],\"prompt\":\"synthetic prompt retained\",\"output\":\"synthetic model output retained\"}",
   "headers": {
-    "authorization": "Bearer synthetic-secret"
+    "authorization": "Bearer SYNTHETIC-NOT-A-REAL-CREDENTIAL",
+    "x-synthetic-header": "retained"
   },
   "ip_address": "192.0.2.10",
   "device_id": "synthetic-device",
   "session_id": "synthetic-session",
-  "source_code": "print('must-not-leak')"
+  "source_code": "print('synthetic source retained')",
+  "future_unknown": {
+    "new_field": "synthetic-unknown-value"
+  }
 }

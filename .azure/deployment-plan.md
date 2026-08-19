@@ -10,9 +10,9 @@ Generated: 2026-08-19
 
 **Goal:** Build a secure, event-driven pipeline that reads GitHub Copilot audit
 log blobs from the existing `ypycopilottest/github-copilot-audit-log`
-container, parses and sanitizes the events, sends an allowlisted schema through
-the Azure Monitor Logs Ingestion API, and provides Microsoft Sentinel queries,
-analytics, and a workbook.
+container, preserves complete records for security investigation, extracts
+normalized metadata, sends both through the Azure Monitor Logs Ingestion API,
+and provides Microsoft Sentinel queries, analytics, and a workbook.
 
 **Path:** New Project
 
@@ -32,17 +32,23 @@ analytics, and a workbook.
 | Location | West US 2 |
 | Source | Existing `ypycopilottest/github-copilot-audit-log` |
 | Sentinel target | New dedicated Log Analytics workspace with Sentinel enabled |
-| Compliance | No additional requirement; raw payload remains private in the source storage account |
+| Compliance | Security audit use case; full source records must be queryable in the restricted Sentinel workspace |
 
 ### Security and Data Policy
 
 - Use managed identities and Azure RBAC; do not store storage keys, SAS tokens,
   client secrets, or workspace shared keys.
-- Treat `body`, `headers`, prompts, source code, model output, tool arguments,
-  IP addresses, device IDs, and session IDs as sensitive.
-- Use an allowlist sanitizer. Only approved scalar metadata is emitted.
-- Never write raw payloads to Application Insights or exception messages.
+- Preserve the complete outer event by default, including `body`, `headers`,
+  authorization values, prompts, source code, model output, tool arguments,
+  IP/device/session identifiers, and unknown fields.
+- Use a pluggable raw-payload transformation hook that is a no-op by default.
+  Any future masking or deletion must be an explicit customer policy change.
+- Preserve malformed raw records where technically possible with explicit
+  encoding and parse status.
+- Never copy raw payloads into Application Insights or exception messages.
 - Retain the source blobs as the authoritative raw archive.
+- Restrict table/workspace access because `RawEvent` can contain credentials,
+  source code, personal data, and other high-impact security material.
 - Restrict the Function identity to read-only access on the existing source
   container and ingestion access on the DCR.
 
@@ -61,7 +67,8 @@ network-deny policy was detected.
 |-----------|------|------------|------|
 | Blob event processor | Worker | Azure Functions Python v2 model | `src/` |
 | Audit parser | Library | Python gzip/JSON/JSON Lines parsing | `src/copilot_audit/` |
-| Sanitizer | Library | Explicit allowlist and recursive discard policy | `src/copilot_audit/` |
+| Raw transform | Library | Pluggable transformation hook; identity/no-op by default | `src/copilot_audit/transform.py` |
+| Metadata normalizer | Library | Derived fields for efficient KQL filtering | `src/copilot_audit/normalizer.py` |
 | Sentinel ingestion client | Library | Azure Monitor Ingestion SDK + managed identity | `src/copilot_audit/` |
 | Backfill utility | CLI | Python, explicit date/blob selection | `scripts/` |
 | Infrastructure | IaC | AZD + Bicep | `infra/`, `azure.yaml` |
@@ -96,9 +103,10 @@ GitHub Enterprise
   -> BlobCreated Event Grid subscription (*.json.log.gz)
   -> Python Azure Function (Flex Consumption)
        -> parse gzip/plain JSON and JSON Lines
-       -> parse nested body JSON when valid
-       -> allowlist metadata and discard sensitive payloads
-       -> batch records
+       -> preserve original record text or an explicit lossless encoding
+       -> parse nested body JSON for normalized metadata
+       -> apply no-op-by-default raw transformation hook
+       -> safely chunk and batch complete raw records
   -> Azure Monitor Logs Ingestion API
   -> Direct DCR transformation and routing
   -> GitHubCopilotAudit_CL in dedicated Log Analytics workspace
@@ -120,7 +128,7 @@ GitHub Enterprise
 
 ### Target Table Schema
 
-The custom `GitHubCopilotAudit_CL` table will contain only:
+The custom `GitHubCopilotAudit_CL` table will contain:
 
 - `TimeGenerated`
 - `EventId`
@@ -138,21 +146,32 @@ The custom `GitHubCopilotAudit_CL` table will contain only:
 - `PayloadBytes`
 - `ParseStatus`
 - `IngestedAt`
+- `RawEvent` (complete raw record or transformed replacement)
+- `RawEncoding`
+- `RawContentHash`
+- `RawChunkIndex`
+- `RawChunkCount`
 
-The DCR performs final type conversion and projects exactly this schema. It
-does not receive raw `body` or `headers`.
+The DCR performs final type conversion and projects exactly this schema.
+`RawEvent` is chunked only when necessary to remain below Logs Ingestion request
+limits; chunks are reconstructed by `EventId`, `RawContentHash`, and
+`RawChunkIndex`. The hash prevents stale chunks from a changed replay being
+mixed into the selected complete version. No chunk is silently truncated.
 
 ### Reliability
 
 - Event Grid provides at-least-once delivery and retry.
 - Event IDs plus source blob/index form deterministic identifiers.
-- Workbook and hunting queries deduplicate with `arg_max()` by deterministic ID.
+- Workbook and hunting queries deduplicate by deterministic ID plus raw chunk
+  index, and count normalized events from chunk zero only.
 - Transient ingestion failures raise errors for Function/Event Grid retry.
-- Permanently malformed records emit metadata-only parse failures; raw content
-  remains available in the original blob for authorized investigation.
+- Permanently malformed records retain their raw text or base64 bytes with an
+  explicit parse status and encoding.
 - A backfill utility supports explicit historical replay without changing the
   live trigger.
-- Compressed and decompressed payloads are independently capped at 64 MiB.
+- Compressed and decompressed blobs remain bounded at 64 MiB. Blob-level
+  oversize failures are explicit because complete content cannot be downloaded
+  safely; individual retained records are UTF-8-safe chunked for ingestion.
 
 ### Identity and RBAC
 
@@ -174,10 +193,11 @@ The initial workbook will show:
 
 - Request/response volume over time.
 - Model and endpoint distribution.
-- Active user counts without prompt or code content.
+- Active user counts using normalized metadata.
 - Tool-name distribution.
 - Parse and ingestion failures.
 - Duplicate delivery rate.
+- Restricted raw-record inspection and chunk reconstruction guidance.
 
 ---
 
@@ -223,15 +243,25 @@ resource group.
 - [x] Select AZD/Bicep recipe
 - [x] Plan architecture and sensitive-data policy
 - [x] User approved this plan
+- [x] User approved the lossless raw-audit requirement change
+
+### Approved Requirement Revision: Full Audit Visibility
+
+- [x] Add a no-op raw transform plus metadata normalizer
+- [x] Preserve valid, unknown, nested, malformed, and binary-encoded record content
+- [x] Add raw payload, encoding, and chunk metadata to table and Direct DCR
+- [x] Make batching chunk-aware with explicit non-truncating oversized behavior
+- [x] Update backfill, workbook, KQL, documentation, CI, and synthetic tests
+- [x] Re-run the complete `azure-validate` workflow
 
 ### Phase 2: Execution
 
 - [x] Load Azure Functions template selection and composition rules
 - [x] Compose official Flex Consumption + Event Grid Blob trigger templates
-- [x] Generate Python Function, parser, sanitizer, and ingestion client
+- [x] Generate Python Function, parser, transform, normalizer, and ingestion client
 - [x] Generate Log Analytics table, Direct DCR, Sentinel, and workbook IaC
 - [x] Add managed identity and least-privilege RBAC
-- [x] Add unit, parser-fixture, sanitizer, idempotency, and integration tests
+- [x] Add unit, parser-fixture, losslessness, transform, idempotency, and integration tests
 - [x] Add payload-safe Application Insights telemetry
 - [x] Add backfill utility and operator documentation
 - [x] Add CI for lint, type checking, security scanning, and tests
@@ -265,6 +295,40 @@ resource group.
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
+| AZD/auth/context | `azd version`; `azd auth login --check-status`; `azd env get-values`; `az account show` | Passed; AZD 1.28.1, authenticated, approved subscription and `westus2` | 2026-08-19T11:22:07+08:00 |
+| Provision preview | `azd provision --preview --no-prompt` | Passed after final schema changes; preview only, no resources applied | 2026-08-19T11:22:07+08:00 |
+| Bicep | `az bicep build`; `az bicep lint` | Passed without compile or lint errors | 2026-08-19T11:22:07+08:00 |
+| ARM validation | `az deployment sub validate ...` | Succeeded; correlation `09de1a67-f50c-4bac-83bb-a15327ec8ca5` | 2026-08-19T11:22:07+08:00 |
+| What-if | `az deployment sub what-if ...` | Succeeded; 18 creates and 30 existing resources ignored; no deployment | 2026-08-19T11:22:07+08:00 |
+| Python quality | `ruff format`; `ruff check`; `mypy src scripts`; `pytest` | Passed; 35 synthetic tests | 2026-08-19T11:22:07+08:00 |
+| Dependency audit | `python -m pip_audit -r src/requirements.txt` | No known vulnerabilities | 2026-08-19T11:22:07+08:00 |
+| Package | `azd package --no-prompt` | Passed after final parser and schema changes | 2026-08-19T11:22:07+08:00 |
+| Config/hooks | JSON/YAML parsing; PowerShell parser; `sh -n`; `git diff --check` | Passed | 2026-08-19T11:22:07+08:00 |
+| Source/policy/RBAC | Source account/container queries; policy assignment review; role definition verification | Passed; no conflicting assigned policy found; source and role IDs verified | 2026-08-19T11:22:07+08:00 |
+| Fixture/data safety | Credential artifact scans and exact raw-retention tests | Passed; only obvious synthetic payload values; no real audit fixtures or credentials | 2026-08-19T11:22:07+08:00 |
+
+### Role Assignment Verification
+
+- **Status:** Verified by static code review.
+- **Identity:** Flex Consumption Function system-assigned managed identity.
+- **Source role:** Storage Blob Data Reader, scoped to
+  `ypycopilottest/github-copilot-audit-log`.
+- **Runtime roles:** Storage Blob Data Owner and Storage Queue Data Contributor,
+  scoped to the dedicated Function runtime storage account.
+- **Ingestion/telemetry roles:** Monitoring Metrics Publisher, scoped separately
+  to the Direct DCR and Application Insights component.
+- **Issues:** None. No subscription- or resource-group-scoped application data
+  roles, keys, SAS tokens, PATs, or workspace shared keys are configured.
+
+**Validated by:** `azure-validate`
+
+### Superseded baseline proof
+
+The following proof predates the approved full-audit revision and is retained
+only for traceability.
+
+| Check | Command Run | Result | Timestamp |
+|-------|-------------|--------|-----------|
 | AZD/auth/context | `azd version`; `azd auth login --check-status`; `azd env get-values`; `az account show` | Passed; AZD 1.28.1, authenticated, approved subscription and `westus2` | 2026-08-19T10:54:25+08:00 |
 | Provision preview | `azd provision --preview --no-prompt` | Passed; preview only, no changes applied | 2026-08-19T10:54:25+08:00 |
 | Bicep | `az bicep build`; `az bicep lint` | Passed without compile or lint errors | 2026-08-19T10:54:25+08:00 |
@@ -275,9 +339,9 @@ resource group.
 | Package | `azd package --no-prompt` | Passed; Function package produced in the system temp directory | 2026-08-19T10:54:25+08:00 |
 | Config/hooks | JSON/YAML parsing; PowerShell parser; `sh -n`; `git diff --check` | Passed | 2026-08-19T10:54:25+08:00 |
 | Source/policy/RBAC | Source account/container queries; policy assignment review; role definition verification | Passed; source is StorageV2 in `westus2`; role IDs and least-privilege scopes verified | 2026-08-19T10:54:25+08:00 |
-| Privacy | Credential-pattern/path scans; synthetic fixture scan; sanitizer leakage tests | Passed; no credential artifacts or real audit fixtures | 2026-08-19T10:54:25+08:00 |
+| Fixture safety | Credential-pattern/path scans and synthetic fixture scan | Passed; no credential artifacts or real audit fixtures | 2026-08-19T10:54:25+08:00 |
 
-**Validated by:** `azure-validate`
+**Previously validated by:** `azure-validate`
 
 ---
 
@@ -286,11 +350,11 @@ resource group.
 | File | Purpose | Status |
 |------|---------|--------|
 | `.azure/deployment-plan.md` | Source-of-truth plan | Complete |
-| `README.md` | Architecture, setup, privacy, and operations | Complete |
+| `README.md` | Architecture, setup, security, and operations | Complete |
 | `azure.yaml` | AZD service definition and Event Grid postdeploy hook | Complete |
 | `infra/` | Bicep resources, RBAC, Direct DCR, Sentinel, workbook | Complete |
 | `src/function_app.py` | Event Grid Blob trigger entrypoint | Complete |
-| `src/copilot_audit/` | Parser, sanitizer, schema, ingestion client | Complete |
+| `src/copilot_audit/` | Parser, transform, normalizer, schema, ingestion client | Complete |
 | `sentinel/` | KQL hunting and analytics queries | Complete |
 | `scripts/backfill.py` | Explicit historical replay | Complete |
 | `tests/` | Synthetic fixtures and automated tests | Complete |
@@ -300,7 +364,8 @@ resource group.
 
 ## 10. Current Step
 
-Commit the validated preparation. Do not deploy Azure resources.
+Validation is complete. Await explicit deployment approval; do not deploy Azure
+resources.
 
 ---
 
@@ -316,7 +381,7 @@ Commit the validated preparation. Do not deploy Azure resources.
   configured after code deployment by the official-template composition hook.
 - **Logs ingestion:** Direct DCR API `2024-03-11` supplies its own Logs
   Ingestion endpoint; a DCE is not required without Azure Monitor Private Link.
-- **Backend verification:** Parser, sanitizer, batching, bounded backfill,
+- **Backend verification:** Parser, lossless transform, normalizer, batching, bounded backfill,
   ingestion propagation, and payload-safe Function failure handling tested
   locally with synthetic data.
 - **UI verification:** Not applicable; the only UI artifact is the declarative

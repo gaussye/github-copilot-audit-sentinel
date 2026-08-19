@@ -23,6 +23,11 @@ class AuditRecord:
     PayloadBytes: int
     ParseStatus: str
     IngestedAt: str
+    RawEvent: str
+    RawEncoding: str
+    RawContentHash: str
+    RawChunkIndex: int
+    RawChunkCount: int
 
     def to_log(self) -> dict[str, Any]:
         return asdict(self)

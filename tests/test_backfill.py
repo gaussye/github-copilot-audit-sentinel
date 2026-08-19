@@ -86,3 +86,4 @@ def test_backfill_does_not_download_oversized_blob() -> None:
 
     assert len(records) == 1
     assert records[0].ParseStatus == "blob_too_large"
+    assert records[0].RawEncoding == "not-captured:blob_too_large"

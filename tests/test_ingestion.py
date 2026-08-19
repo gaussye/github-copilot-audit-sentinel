@@ -66,3 +66,18 @@ def test_uploads_each_batch_once() -> None:
 
     assert uploaded == 501
     assert [len(call) for call in client.calls] == [500, 1]
+
+
+def test_single_oversized_record_fails_without_truncation() -> None:
+    raw = "complete-synthetic-payload"
+
+    with pytest.raises(ValueError, match="was not truncated"):
+        list(
+            batches(
+                [{"RawEvent": raw}],
+                max_records=10,
+                max_bytes=10,
+            )
+        )
+
+    assert raw == "complete-synthetic-payload"

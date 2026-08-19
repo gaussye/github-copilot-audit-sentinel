@@ -112,6 +112,11 @@ resource auditTable 'Microsoft.OperationalInsights/workspaces/tables@2022-10-01'
         { name: 'PayloadBytes', type: 'long' }
         { name: 'ParseStatus', type: 'string' }
         { name: 'IngestedAt', type: 'datetime' }
+        { name: 'RawEvent', type: 'string' }
+        { name: 'RawEncoding', type: 'string' }
+        { name: 'RawContentHash', type: 'string' }
+        { name: 'RawChunkIndex', type: 'int' }
+        { name: 'RawChunkCount', type: 'int' }
       ]
     }
   }
@@ -147,6 +152,11 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
           { name: 'PayloadBytes', type: 'long' }
           { name: 'ParseStatus', type: 'string' }
           { name: 'IngestedAt', type: 'datetime' }
+          { name: 'RawEvent', type: 'string' }
+          { name: 'RawEncoding', type: 'string' }
+          { name: 'RawContentHash', type: 'string' }
+          { name: 'RawChunkIndex', type: 'int' }
+          { name: 'RawChunkCount', type: 'int' }
         ]
       }
     }
@@ -185,7 +195,12 @@ resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2024-03-11' 
               SourceRecordIndex = toint(SourceRecordIndex),
               PayloadBytes = tolong(PayloadBytes),
               ParseStatus = tostring(ParseStatus),
-              IngestedAt = todatetime(IngestedAt)
+              IngestedAt = todatetime(IngestedAt),
+              RawEvent = tostring(RawEvent),
+              RawEncoding = tostring(RawEncoding),
+              RawContentHash = tostring(RawContentHash),
+              RawChunkIndex = toint(RawChunkIndex),
+              RawChunkCount = toint(RawChunkCount)
           '''
       }
     ]

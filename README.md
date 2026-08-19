@@ -1,9 +1,15 @@
 # GitHub Copilot Audit Sentinel
 
-Production-oriented proof of concept for routing privacy-sanitized GitHub
-Enterprise Copilot audit metadata into Microsoft Sentinel. Raw audit content
-stays in the existing private Blob container; only the schema documented below
-is sent to Azure Monitor.
+Production-oriented proof of concept that retains complete GitHub Enterprise
+Copilot audit records in Microsoft Sentinel while deriving normalized metadata
+for efficient hunting and dashboards.
+
+> [!WARNING]
+> `GitHubCopilotAudit_CL.RawEvent` can contain credentials, Authorization
+> headers, prompts, source code, model output, tool arguments, personal data,
+> IP addresses, and device/session identifiers. Restrict workspace and table
+> access to the security team, use the shortest investigation-compatible
+> retention, control exports, and treat query results as sensitive evidence.
 
 ## Architecture
 
@@ -14,9 +20,10 @@ GitHub Enterprise audit delivery
   -> Python 3.12 Azure Function (Flex Consumption, system identity)
        -> gzip/plain detection
        -> JSON object, array, or JSON Lines parsing
-       -> nested body parsing in memory
-       -> strict metadata allowlist
-       -> bounded Logs Ingestion API batches
+       -> exact/raw record retention with explicit encoding
+       -> no-op-by-default transformation policy
+       -> normalized metadata extraction
+       -> UTF-8-safe raw chunking and bounded ingestion batches
   -> Direct Data Collection Rule
   -> GitHubCopilotAudit_CL
   -> Microsoft Sentinel workbook and KQL
@@ -28,53 +35,94 @@ runtime storage account has shared-key access and public blob access disabled.
 The Function uses its system-assigned identity for runtime storage, source
 container reads, Application Insights authentication, and DCR ingestion.
 
-## Emitted schema
+## Lossless raw-record contract
 
-The DCR projects exactly these fields into `GitHubCopilotAudit_CL`:
+The default transform is identity/no-op. No source field is selected, omitted,
+masked, or truncated:
+
+- A root JSON object retains its original decoded text, including whitespace.
+- Each JSONL record retains its exact line text; `SourceRecordIndex` is its
+  zero-based physical line index.
+- JSON array elements retain their exact source token, including duplicate
+  properties, while the parsed view is used only for normalized metadata.
+- Malformed text retains its exact record text.
+- Invalid UTF-8 and corrupt gzip bytes are base64 encoded.
+- `RawEncoding` states how to interpret `RawEvent`.
+- Raw values larger than 64,000 UTF-8 bytes are split without breaking a code
+  point. Concatenate chunks ordered by `RawChunkIndex`; `RawChunkCount` states
+  completeness.
+  - `RawContentHash` versions the complete transformed representation so changed
+    replays cannot be reconstructed with stale chunks.
+- Compressed and decompressed blobs are bounded at 64 MiB. Content beyond a
+  blob safety limit is explicitly marked `not-captured:<status>` rather than
+  silently truncated or partially ingested.
+
+`EventId`, `SourceBlob`, and `SourceRecordIndex` identify one source record.
+All chunks of that record share `EventId` and `RawContentHash`; a unique
+ingested row is identified by
+`(EventId, RawContentHash, RawChunkIndex)`.
+
+## Table schema
+
+The DCR projects these fields into `GitHubCopilotAudit_CL`:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `TimeGenerated` | datetime | Source timestamp, or ingestion time with an explicit parse status |
-| `EventId` | string | SHA-256 of source blob path plus zero-based source record index |
-| `GitHubRequestId` | string | Allowlisted GitHub request identifier |
-| `UserId` | string | Allowlisted GitHub actor/user identifier |
-| `EnterpriseId` | string | Allowlisted enterprise identifier |
-| `EventType` | string | Audit action or event type |
-| `Endpoint` | string | API endpoint metadata |
-| `Model` | string | Model name metadata |
-| `InteractionType` | string | Interaction category metadata |
-| `ToolNames` | string | JSON-encoded array containing tool names only |
-| `StatusCode` | int | Response status code |
+| `TimeGenerated` | datetime | Source timestamp, or ingestion time with explicit status |
+| `EventId` | string | SHA-256 of source blob path plus source record index |
+| `GitHubRequestId` | string | Derived request identifier |
+| `UserId` | string | Derived actor/user identifier |
+| `EnterpriseId` | string | Derived enterprise identifier |
+| `EventType` | string | Derived action or event type |
+| `Endpoint` | string | Derived API endpoint |
+| `Model` | string | Derived model name |
+| `InteractionType` | string | Derived interaction category |
+| `ToolNames` | string | JSON array of derived tool names |
+| `StatusCode` | int | Derived response status |
 | `SourceBlob` | string | Blob path, never a URL or SAS |
 | `SourceRecordIndex` | int | Stable object/array/JSONL position |
-| `PayloadBytes` | long | Encoded source-record size |
-| `ParseStatus` | string | Explicit parser/body/timestamp status |
+| `PayloadBytes` | long | Original record size |
+| `ParseStatus` | string | Parser/body/timestamp status |
 | `IngestedAt` | datetime | UTC processing time |
+| `RawEvent` | string | Complete raw/transformed payload chunk |
+| `RawEncoding` | string | Raw representation and transform marker |
+| `RawContentHash` | string | SHA-256 version of encoding plus complete transformed content |
+| `RawChunkIndex` | int | Zero-based chunk position |
+| `RawChunkCount` | int | Total chunks for the source record |
 
-`body`, headers, authorization values, prompts, source code, model output, tool
-arguments, IP addresses, device identifiers, and session identifiers are parsed
-only when needed and are never emitted. Unknown fields are discarded rather
-than copied. Malformed input produces a metadata-only row with a parse status;
-the original bytes remain only in the source archive.
+Normalized columns are derived for filtering only. `RawEvent` remains the audit
+evidence and includes unknown/new fields automatically.
 
-## Prerequisites
+## Raw transformation policy
+
+Policy code is isolated in `src/copilot_audit/transform.py`. The default is:
+
+```text
+RAW_TRANSFORM_POLICY=identity
+```
+
+This performs no redaction. An explicit example policy can be enabled later:
+
+```text
+RAW_TRANSFORM_POLICY=delete-top-level-fields
+RAW_TRANSFORM_DELETE_FIELDS=authorization,headers
+```
+
+That policy is intentionally opt-in and fails closed on incompatible records;
+it is never activated by this repository. Custom policies implement the
+`RawTransform` callable and return `RawPayload`. Parsing, normalization,
+chunking, batching, and ingestion do not need to be rewritten.
+
+## Prerequisites and local validation
 
 - Azure CLI, Azure Developer CLI, Azure Functions Core Tools, Python 3.12, and
   Bicep.
 - Access to subscription `3456866f-6478-471f-8d59-a29a335d797a`.
-- Contributor on resource group `aks-test`.
-- User Access Administrator (or equivalent `roleAssignments/write`
-  permission) on `aks-test` and the existing source container.
-- The resource providers `Microsoft.Web`, `Microsoft.Storage`,
-  `Microsoft.EventGrid`, `Microsoft.Insights`,
-  `Microsoft.OperationalInsights`, `Microsoft.OperationsManagement`, and
-  `Microsoft.SecurityInsights` registered in the subscription.
-- The existing `ypycopilottest/github-copilot-audit-log` container and GitHub
-  Enterprise audit delivery configured independently.
-
-No deployment has been run by this repository preparation.
-
-## Local validation
+- Contributor plus role-assignment write access on `aks-test` and the existing
+  source container.
+- Required Azure resource providers registered.
+- Existing `ypycopilottest/github-copilot-audit-log` and GitHub Enterprise
+  audit delivery.
 
 ```powershell
 python -m venv .venv
@@ -85,13 +133,12 @@ python -m venv .venv
 az bicep build --file infra/main.bicep
 ```
 
-Fixtures under `tests/fixtures` are synthetic. Do not download audit logs into
-this repository or use production data in tests.
+Fixtures are obviously synthetic. Never download real audit logs into this
+repository. No deployment is performed by preparation or validation.
 
 ## Azure setup
 
-After deployment approval, initialize an AZD environment and inspect the
-generated parameter values before provisioning:
+After explicit deployment approval:
 
 ```powershell
 azd auth login
@@ -102,77 +149,93 @@ azd provision --no-prompt
 azd deploy --no-prompt
 ```
 
-Preparation and validation do not execute these commands. The split provision
-and deploy sequence is intentional so identity and role assignments can
-propagate before code starts.
+The split sequence allows managed-identity RBAC propagation. The postdeploy
+hook retrieves the platform-generated `blobs_extension` key only in memory to
+configure the filtered BlobTrigger webhook; it never prints, commits, exports,
+or stores that key in application settings.
 
 ## Operations
 
-The Blob trigger uses Event Grid and is filtered twice: the Event Grid
-subscription accepts only BlobCreated events in the target container ending in
-`.json.log.gz`, and the Python v2 trigger path applies the same container and
-suffix boundary. Compressed input and decompressed content are each capped at
-64 MiB; larger inputs become metadata-only parse-status rows.
-
-Azure Functions event-based Blob triggers require the platform's
-`blobs_extension` system-key webhook. The AZD postdeploy hook retrieves this
-runtime-generated key only after code deployment, creates or updates the
-filtered Event Grid subscription, and clears the local variable. The key is
-never committed, printed, exported by Bicep, or placed in application settings.
-The deployment principal therefore needs Function host-key read permission and
-Event Grid event-subscription write permission.
-
-Event Grid and Azure Functions provide at-least-once processing. `EventId` is
-stable for the same blob path and source position. Queries should deduplicate
-before analysis:
+Event Grid and Functions are at-least-once. Select one complete content version
+before deduplicating its chunks; the canonical query is in
+`sentinel/hunting-queries.kql`. A minimal query for unchanged replays is:
 
 ```kusto
 GitHubCopilotAudit_CL
+| extend ContentVersion=coalesce(RawContentHash, "legacy"),
+         ChunkIndex=coalesce(RawChunkIndex, 0)
+| summarize arg_max(IngestedAt, *) by EventId, ContentVersion, ChunkIndex
+```
+
+Count source events from chunk zero:
+
+```kusto
+GitHubCopilotAudit_CL
+| where coalesce(RawChunkIndex, 0) == 0
 | summarize arg_max(IngestedAt, *) by EventId
 ```
 
-Transient Azure SDK failures are not swallowed; they propagate to the Functions
-host for platform retry. Logs contain counts and exception class names only,
-never blob payloads, record values, blob names, or exception messages.
+Reconstruct one complete record:
+
+```kusto
+let target_event_id = "<EventId>";
+GitHubCopilotAudit_CL
+| where EventId == target_event_id
+| extend ContentVersion=coalesce(RawContentHash, "legacy"),
+         ChunkIndex=coalesce(RawChunkIndex, 0)
+| summarize arg_max(IngestedAt, *) by EventId, ContentVersion, ChunkIndex
+| summarize LatestIngestedAt=max(IngestedAt),
+            PresentChunks=dcount(ChunkIndex),
+            ExpectedChunks=max(coalesce(RawChunkCount, 1))
+            by EventId, ContentVersion
+| where PresentChunks == ExpectedChunks
+| top 1 by LatestIngestedAt desc
+| join kind=inner (
+    GitHubCopilotAudit_CL
+    | where EventId == target_event_id
+    | extend ContentVersion=coalesce(RawContentHash, "legacy"),
+            ChunkIndex=coalesce(RawChunkIndex, 0)
+) on EventId, ContentVersion
+| summarize arg_max(IngestedAt, *) by EventId, ContentVersion, ChunkIndex
+| order by ChunkIndex asc
+| summarize RawEvent=strcat_array(make_list(RawEvent), ""),
+            RawEncoding=any(RawEncoding),
+            RawContentHash=any(RawContentHash)
+```
+
+Transient ingestion failures propagate for platform retry. Application
+Insights receives counts, stages, and exception class names only—not raw
+records or exception messages that might echo record content.
 
 ### Backfill
 
-Backfill is dry-run by default and refuses unbounded container replay. Select
-either explicit blobs or a date window no longer than 31 days; all runs are
-capped by `--max-blobs` (hard maximum 1,000).
+Backfill uses the same lossless transform, chunking, and batching path. It is
+dry-run by default and requires explicit blobs or a date window of at most 31
+days. `--max-blobs` defaults to 100 and has a hard maximum of 1,000.
 
 ```powershell
-# Dry-run an explicit selection
 python scripts/backfill.py --blob audit/2026/08/19/example.json.log.gz
-
-# Dry-run a bounded date/prefix selection
 python scripts/backfill.py `
   --start 2026-08-01T00:00:00Z `
   --end 2026-08-08T00:00:00Z `
   --prefix audit/2026/08/ `
   --max-blobs 100
-
-# Add --execute only after reviewing the printed selection
 python scripts/backfill.py --blob audit/2026/08/19/example.json.log.gz --execute
 ```
 
-Local backfill uses the developer's Azure identity. It requires source Blob
-Data Reader access and Monitoring Metrics Publisher on the DCR. Never use keys,
-SAS, workspace shared keys, PATs, or application secrets.
+The local identity needs source Blob Data Reader and DCR Monitoring Metrics
+Publisher. Never use storage keys, SAS, PATs, application secrets, or workspace
+shared keys.
 
-## Sentinel content
+## Sentinel security and retention
 
-- `infra/workbook.json` is deployed as a shared Sentinel workbook.
-- `sentinel/hunting-queries.kql` contains deduplication, parse health, anomalous
-  volume, model/endpoint, and tool-use hunts.
-- `sentinel/analytics-rules.kql` contains starting queries for scheduled
-  analytics rules. Tune thresholds against a representative sanitized baseline
-  before enabling incidents.
-
-## Privacy operations
-
-Access to the raw source account should remain more restrictive than access to
-the Sentinel workspace. Treat `UserId`, `EnterpriseId`, `GitHubRequestId`, and
-`SourceBlob` as organizational metadata and apply workspace RBAC accordingly.
-Use Azure Activity Logs to review RBAC changes. Do not log payloads while
-debugging; reproduce parser issues with a new synthetic fixture instead.
+- `infra/workbook.json` contains normalized dashboards plus a clearly marked
+  restricted raw-record preview.
+- `sentinel/hunting-queries.kql` includes chunk-aware deduplication,
+  reconstruction, parse health, anomaly, and tool-use queries.
+- `sentinel/analytics-rules.kql` contains chunk-aware candidate rules.
+- The POC retention is 30 days. Security owners must review this against data
+  classification, legal hold, incident response, and credential-exposure
+  requirements before deployment.
+- Limit Log Analytics/Sentinel roles to the audit team, review query/export
+  activity, and avoid copying raw records into tickets or lower-trust systems.

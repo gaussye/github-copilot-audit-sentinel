@@ -19,7 +19,11 @@ class FakeBlobClient:
 def test_function_boundary_redacts_sensitive_exception_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_safely(content: bytes, source_blob: str) -> list[object]:
+    def fail_safely(
+        content: bytes,
+        source_blob: str,
+        **kwargs: object,
+    ) -> list[object]:
         raise ValueError("sensitive source payload")
 
     monkeypatch.setattr(function_app, "process_blob", fail_safely)

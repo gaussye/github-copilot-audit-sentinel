@@ -8,10 +8,13 @@ from typing import Any
 
 from .parser import ParsedItem
 from .schema import AuditRecord, azure_timestamp
+from .transform import RawPayload, RawTransform, apply_transform, identity_transform
 
 _MAX_TEXT = 512
 _MAX_TOOL_NAMES = 50
 _MISSING = object()
+# Keeps even worst-case JSON string escaping comfortably below the 750 KB batch cap.
+RAW_CHUNK_MAX_BYTES = 64_000
 
 
 def _lookup(event: dict[str, Any], paths: Iterable[tuple[str, ...]]) -> Any:
@@ -107,11 +110,33 @@ def deterministic_event_id(source_blob: str, source_index: int) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def sanitize_item(
+def _chunks(value: str, maximum_bytes: int = RAW_CHUNK_MAX_BYTES) -> list[str]:
+    encoded = value.encode()
+    if len(encoded) <= maximum_bytes:
+        return [value]
+    chunks: list[str] = []
+    offset = 0
+    while offset < len(encoded):
+        end = min(offset + maximum_bytes, len(encoded))
+        while end > offset:
+            try:
+                chunks.append(encoded[offset:end].decode())
+                break
+            except UnicodeDecodeError:
+                end -= 1
+        if end == offset:
+            raise ValueError("Unable to split raw payload on a UTF-8 boundary")
+        offset = end
+    return chunks
+
+
+def normalize_item(
     item: ParsedItem,
     source_blob: str,
     ingested_at: datetime,
-) -> AuditRecord:
+    *,
+    transform: RawTransform = identity_transform,
+) -> list[AuditRecord]:
     event = item.value or {}
     body, body_status = _parse_body(event)
     timestamp, timestamp_valid = _parse_time(
@@ -125,51 +150,77 @@ def sanitize_item(
     if item.value is not None and not timestamp_valid:
         statuses.append("timestamp_missing_or_invalid")
 
-    tools = _tool_names(event, body)
-    return AuditRecord(
-        TimeGenerated=timestamp,
-        EventId=deterministic_event_id(source_blob, item.index),
-        GitHubRequestId=_safe_text(
-            _lookup(
-                event,
-                (
-                    ("github_request_id",),
-                    ("request_id",),
-                    ("request", "id"),
-                    ("x-github-request-id",),
-                ),
-            )
-        ),
-        UserId=_safe_text(
-            _lookup(event, (("user_id",), ("actor_id",), ("actor", "id"), ("user", "id")))
-        ),
-        EnterpriseId=_safe_text(_lookup(event, (("enterprise_id",), ("enterprise", "id")))),
-        EventType=_safe_text(_lookup(event, (("event_type",), ("action",), ("type",)))),
-        Endpoint=_safe_text(
-            _lookup(
-                event,
-                (("endpoint",), ("request", "endpoint"), ("request", "path")),
-            )
-            or _lookup(body, (("endpoint",),))
-        ),
-        Model=_safe_text(
-            _lookup(event, (("model",), ("model_name",)))
-            or _lookup(body, (("model",), ("model_name",)))
-        ),
-        InteractionType=_safe_text(
-            _lookup(event, (("interaction_type",), ("interaction", "type")))
-            or _lookup(body, (("interaction_type",),))
-        ),
-        ToolNames=json.dumps(tools, separators=(",", ":")),
-        StatusCode=_safe_int(
-            _lookup(
-                event,
-                (("status_code",), ("response", "status_code"), ("request", "status_code")),
-            )
-        ),
-        SourceBlob=source_blob[:1024],
-        SourceRecordIndex=item.index,
-        PayloadBytes=item.payload_bytes,
-        ParseStatus=";".join(statuses),
-        IngestedAt=azure_timestamp(ingested_at),
+    transformed = apply_transform(
+        RawPayload(item.raw_content, item.raw_encoding),
+        transform,
     )
+    chunks = _chunks(transformed.content)
+    content_hash = hashlib.sha256(
+        f"{transformed.encoding}\0{transformed.content}".encode()
+    ).hexdigest()
+    tools = _tool_names(event, body)
+    event_id = deterministic_event_id(source_blob, item.index)
+    records: list[AuditRecord] = []
+    for chunk_index, chunk in enumerate(chunks):
+        records.append(
+            AuditRecord(
+                TimeGenerated=timestamp,
+                EventId=event_id,
+                GitHubRequestId=_safe_text(
+                    _lookup(
+                        event,
+                        (
+                            ("github_request_id",),
+                            ("request_id",),
+                            ("request", "id"),
+                            ("x-github-request-id",),
+                        ),
+                    )
+                ),
+                UserId=_safe_text(
+                    _lookup(
+                        event,
+                        (("user_id",), ("actor_id",), ("actor", "id"), ("user", "id")),
+                    )
+                ),
+                EnterpriseId=_safe_text(_lookup(event, (("enterprise_id",), ("enterprise", "id")))),
+                EventType=_safe_text(_lookup(event, (("event_type",), ("action",), ("type",)))),
+                Endpoint=_safe_text(
+                    _lookup(
+                        event,
+                        (("endpoint",), ("request", "endpoint"), ("request", "path")),
+                    )
+                    or _lookup(body, (("endpoint",),))
+                ),
+                Model=_safe_text(
+                    _lookup(event, (("model",), ("model_name",)))
+                    or _lookup(body, (("model",), ("model_name",)))
+                ),
+                InteractionType=_safe_text(
+                    _lookup(event, (("interaction_type",), ("interaction", "type")))
+                    or _lookup(body, (("interaction_type",),))
+                ),
+                ToolNames=json.dumps(tools, separators=(",", ":")),
+                StatusCode=_safe_int(
+                    _lookup(
+                        event,
+                        (
+                            ("status_code",),
+                            ("response", "status_code"),
+                            ("request", "status_code"),
+                        ),
+                    )
+                ),
+                SourceBlob=source_blob[:1024],
+                SourceRecordIndex=item.index,
+                PayloadBytes=item.payload_bytes,
+                ParseStatus=";".join(statuses),
+                IngestedAt=azure_timestamp(ingested_at),
+                RawEvent=chunk,
+                RawEncoding=transformed.encoding,
+                RawContentHash=content_hash,
+                RawChunkIndex=chunk_index,
+                RawChunkCount=len(chunks),
+            )
+        )
+    return records

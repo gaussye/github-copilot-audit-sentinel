@@ -20,6 +20,9 @@ def test_parses_plain_and_gzip_despite_suffix(compressed: bool) -> None:
     assert len(result) == 1
     assert result[0].parse_status == "parsed"
     assert result[0].value is not None
+    assert result[0].raw_content == content.decode()
+    expected_encoding = "gzip+utf-8-json" if compressed else "utf-8-json"
+    assert result[0].raw_encoding == expected_encoding
 
 
 @pytest.mark.parametrize(
@@ -30,12 +33,23 @@ def test_parses_supported_shapes(fixture: str, expected: int) -> None:
     assert len(parse_blob((FIXTURES / fixture).read_bytes())) == expected
 
 
-def test_malformed_json_line_becomes_metadata_only_item() -> None:
+def test_array_item_preserves_duplicate_fields_exactly() -> None:
+    raw_item = '{"authorization":"synthetic-first","authorization":"synthetic-second"}'
+
+    result = parse_blob(f"[ {raw_item} ]".encode())
+
+    assert result[0].raw_content == raw_item
+    assert result[0].raw_encoding == "utf-8-json-array-item"
+
+
+def test_malformed_json_line_retains_raw_item() -> None:
     result = parse_blob(b'{"action":"ok"}\nnot-json\n{"action":"also-ok"}')
 
     assert [item.index for item in result] == [0, 1, 2]
     assert result[1].value is None
     assert result[1].parse_status == "invalid_json"
+    assert result[1].raw_content == "not-json"
+    assert result[1].raw_encoding == "utf-8-text-jsonl-record"
 
 
 def test_invalid_gzip_is_not_treated_as_plain_text() -> None:
@@ -43,6 +57,8 @@ def test_invalid_gzip_is_not_treated_as_plain_text() -> None:
 
     assert result[0].value is None
     assert result[0].parse_status == "invalid_gzip"
+    assert result[0].raw_encoding == "base64-invalid-gzip"
+    assert result[0].raw_content
 
 
 def test_zlib_corruption_becomes_metadata_status() -> None:
@@ -50,3 +66,25 @@ def test_zlib_corruption_becomes_metadata_status() -> None:
 
     assert result[0].value is None
     assert result[0].parse_status == "invalid_gzip"
+    assert result[0].raw_encoding == "base64-invalid-gzip"
+
+
+def test_jsonl_record_boundaries_and_raw_lines_are_preserved() -> None:
+    payload = b'{"a":1}\n  { "b": 2 }  \nmalformed synthetic'
+
+    result = parse_blob(payload)
+
+    assert [item.index for item in result] == [0, 1, 2]
+    assert [item.raw_content for item in result] == [
+        '{"a":1}',
+        '  { "b": 2 }  ',
+        "malformed synthetic",
+    ]
+
+
+def test_invalid_utf8_is_retained_as_base64() -> None:
+    result = parse_blob(b"\xff\xfe\xfd")
+
+    assert result[0].parse_status == "invalid_utf8"
+    assert result[0].raw_encoding == "base64"
+    assert result[0].raw_content == "//79"

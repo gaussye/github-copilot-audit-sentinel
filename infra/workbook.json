@@ -4,7 +4,7 @@
     {
       "type": 1,
       "content": {
-        "json": "# GitHub Copilot Audit\n\nOperational visibility for ingested GitHub Copilot audit events."
+        "json": "# GitHub Copilot Audit\n\nOperational visibility for complete audit records. **RawEvent can contain credentials, source code, prompts, and personal data. Restrict workbook access to authorized security responders.**"
       },
       "name": "title"
     },
@@ -12,7 +12,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(24h)\n| summarize Events=count(), UniqueEvents=dcount(EventId), DuplicateRate=round(100.0 * (1.0 - todouble(dcount(EventId)) / count()), 2)",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(24h) and coalesce(RawChunkIndex, 0) == 0\n| summarize Events=count(), UniqueEvents=dcount(EventId), DuplicateRate=round(100.0 * (1.0 - todouble(dcount(EventId)) / count()), 2)",
         "size": 4,
         "title": "24-hour ingestion health",
         "queryType": 0,
@@ -24,7 +24,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by bin(TimeGenerated, 1h)\n| render timechart",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d) and coalesce(RawChunkIndex, 0) == 0\n| summarize Events=dcount(EventId) by bin(TimeGenerated, 1h)\n| render timechart",
         "size": 0,
         "title": "Audit event volume",
         "queryType": 0,
@@ -36,7 +36,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by Model, Endpoint\n| top 20 by Events desc\n| render barchart",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d) and coalesce(RawChunkIndex, 0) == 0\n| summarize Events=dcount(EventId) by Model, Endpoint\n| top 20 by Events desc\n| render barchart",
         "size": 0,
         "title": "Models and endpoints",
         "queryType": 0,
@@ -48,7 +48,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by UserId\n| top 20 by Events desc\n| render barchart",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d) and coalesce(RawChunkIndex, 0) == 0\n| summarize Events=dcount(EventId) by UserId\n| top 20 by Events desc\n| render barchart",
         "size": 0,
         "title": "Most active users",
         "queryType": 0,
@@ -60,7 +60,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| extend Tools=parse_json(ToolNames)\n| mv-expand ToolName=Tools to typeof(string)\n| where isnotempty(ToolName)\n| summarize Events=count() by ToolName\n| top 20 by Events desc\n| render piechart",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d) and coalesce(RawChunkIndex, 0) == 0\n| extend Tools=parse_json(ToolNames)\n| mv-expand ToolName=Tools to typeof(string)\n| where isnotempty(ToolName)\n| summarize Events=dcount(EventId) by ToolName\n| top 20 by Events desc\n| render piechart",
         "size": 0,
         "title": "Tool usage",
         "queryType": 0,
@@ -72,7 +72,7 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by ParseStatus\n| render piechart",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d) and coalesce(RawChunkIndex, 0) == 0\n| summarize Events=dcount(EventId) by ParseStatus\n| render piechart",
         "size": 0,
         "title": "Parse status",
         "queryType": 0,
@@ -96,13 +96,25 @@
       "type": 3,
       "content": {
         "version": "KqlItem/1.0",
-        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Total=count(), Unique=dcount(EventId) by bin(TimeGenerated, 1d)\n| extend DuplicateRate=round(100.0 * (1.0 - todouble(Unique) / Total), 2)\n| project TimeGenerated, DuplicateRate\n| render timechart",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d) and coalesce(RawChunkIndex, 0) == 0\n| summarize Total=count(), Unique=dcount(EventId) by bin(TimeGenerated, 1d)\n| extend DuplicateRate=round(100.0 * (1.0 - todouble(Unique) / Total), 2)\n| project TimeGenerated, DuplicateRate\n| render timechart",
         "size": 0,
         "title": "Duplicate event rate",
         "queryType": 0,
         "visualization": "timechart"
       },
       "name": "duplicate-rate"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(24h) and coalesce(RawChunkIndex, 0) == 0\n| summarize arg_max(IngestedAt, *) by EventId\n| top 100 by TimeGenerated desc\n| project TimeGenerated, EventId, EventType, UserId, ParseStatus, RawEncoding, RawContentHash, RawChunkCount, RawPreview=substring(RawEvent, 0, 4000)",
+        "size": 0,
+        "title": "Restricted raw record preview (first chunk, first 4,000 characters)",
+        "queryType": 0,
+        "visualization": "table"
+      },
+      "name": "restricted-raw-preview"
     }
   ],
   "isLocked": false

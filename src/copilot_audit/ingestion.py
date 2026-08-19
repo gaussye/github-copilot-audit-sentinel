@@ -47,7 +47,9 @@ def batches(
             json.dumps(record, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         )
         if record_bytes > max_bytes:
-            raise ValueError("A sanitized record exceeds the ingestion batch byte limit")
+            raise ValueError(
+                "A record exceeds the ingestion batch byte limit; raw content was not truncated"
+            )
         if current and (
             len(current) >= max_records or current_bytes + record_bytes + 1 > max_bytes
         ):

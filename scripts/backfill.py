@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from copilot_audit.ingestion import build_client, upload_records  # noqa: E402
 from copilot_audit.processor import MAX_BLOB_BYTES, metadata_failure, process_blob  # noqa: E402
 from copilot_audit.schema import AuditRecord  # noqa: E402
+from copilot_audit.transform import configured_transform  # noqa: E402
 
 MAX_WINDOW_DAYS = 31
 HARD_MAX_BLOBS = 1_000
@@ -93,7 +94,11 @@ def read_backfill_blob(blob_client: BlobClient, name: str) -> list[AuditRecord]:
             payload_bytes=properties.size,
             parse_status="blob_too_large",
         )
-    return process_blob(blob_client.download_blob().readall(), name)
+    return process_blob(
+        blob_client.download_blob().readall(),
+        name,
+        transform=configured_transform(),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
