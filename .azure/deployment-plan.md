@@ -1,6 +1,6 @@
 # Azure Deployment Plan
 
-> **Status:** Validated
+> **Status:** Deployed
 
 Generated: 2026-08-19
 
@@ -315,9 +315,16 @@ resource group.
 
 ### Phase 4: Deployment
 
-- [ ] Invoke `azure-deploy` only after explicit deployment approval
-- [ ] Verify Event Grid delivery, custom-table ingestion, and workbook queries
-- [ ] Update status to `Deployed`
+- [x] Invoke `azure-deploy` only after explicit deployment approval
+- [x] Provision infrastructure in `aks-test`, West US 2
+- [x] Deploy and enable native `process_blob_upload` EventGridTrigger
+- [x] Configure the filtered native Azure Function event subscription
+- [x] Verify runtime storage security settings and live managed-identity roles
+- [x] Verify Log Analytics, Sentinel, custom table, DCR, and workbook
+- [x] Verify Event Grid delivery, managed-identity Blob read, Logs Ingestion 204,
+      and queryable lossless synthetic record
+- [x] Delete the synthetic validation blob
+- [x] Update status to `Deployed`
 
 ### Phase 3b: Existing-Topic Recovery Validation
 
@@ -466,8 +473,7 @@ only for traceability.
 
 ## 10. Current Step
 
-Return the validated native EventGridTrigger recovery to the parent deployment
-session. This child session must not deploy.
+Deployment and live end-to-end verification are complete.
 
 ---
 
@@ -495,20 +501,7 @@ session. This child session must not deploy.
 
 ## 12. Remaining Deployment Prerequisites
 
-- Set `EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME` to
-  `ypycopilottest-6a08b4cd-1cb5-4b03-af5d-5cc1ae92f536` in the active AZD
-  environment before rerunning provision; it is already set in the validated
-  `audit-sentinel-a8f2` environment.
-- `Microsoft.OperationsManagement` and `Microsoft.SecurityInsights` are now
-  registered following the explicitly approved partial provisioning attempt.
-- The deployment principal needs Contributor plus role-assignment write access
-  on `aks-test`. Function host-system-key read access is not required.
-- The failed provision already created the tagged Function, Application
-  Insights, Log Analytics workspace, runtime storage account, Flex plan, and
-  Direct DCR. The parent must rerun `azd provision --no-prompt` to apply the new
-  source-validation app settings, then run `azd deploy --no-prompt`. The
-  postdeploy hook will target
-  `/subscriptions/3456866f-6478-471f-8d59-a29a335d797a/resourceGroups/aks-test/providers/Microsoft.Web/sites/func-fgymbaw6iea7g/functions/process_blob_upload`.
+None. The approved deployment and live verification are complete.
 
 ---
 
@@ -564,3 +557,37 @@ session. This child session must not deploy.
 - The hooks use the exact Function resource ID with endpoint type
   `azurefunction`; they retrieve no host key and create no secret URL. Checked
   native-command wrappers prevent success output after a CLI failure.
+
+---
+
+## 14. Live Deployment Proof
+
+Recorded from the approved parent deployment on 2026-08-19:
+
+- **Context:** Environment `audit-sentinel-a8f2` provisioned successfully into
+  `aks-test`, West US 2. `Microsoft.OperationsManagement` and
+  `Microsoft.SecurityInsights` are registered.
+- **Runtime storage:** `stfgymbaw6iea7g` has public network access enabled for
+  OneDeploy, shared-key and anonymous Blob access disabled, OAuth as the default,
+  and the narrow `SecurityControl=Ignore` policy-exclusion tag.
+- **Function:** Code deployed successfully to `func-fgymbaw6iea7g`; the HTTPS
+  root returned 200 and enabled function `process_blob_upload` is indexed as
+  native `eventGridTrigger`.
+- **Event Grid:** `egsub-copilot-audit-fgymbaw6iea7` succeeded on the existing
+  system topic with destination `AzureFunction`, only BlobCreated events,
+  prefix `/blobServices/default/containers/github-copilot-audit-log/blobs/`,
+  and suffix `.json.log.gz`. `StorageAntimalwareSubscription` was untouched.
+- **Sentinel:** Workspace `log-copilotauditfgymbaw6iea7g`, Sentinel solution,
+  Analytics table `GitHubCopilotAudit_CL` with 30-day retention, succeeded DCR
+  `dcr-copilot-audit-fgymbaw6iea7`, and workbook
+  `GitHub Copilot Audit Sentinel` version 1.0 all exist.
+- **Live RBAC:** The Function identity has source-container Storage Blob Data
+  Reader, runtime-storage Blob Data Owner and Queue Data Contributor, and
+  Monitoring Metrics Publisher on both the DCR and Application Insights.
+- **End to end:** A synthetic Blob matched and was delivered, the Function
+  invocation succeeded, managed identity downloaded the Blob, Logs Ingestion
+  returned 204, and one record became queryable after initial indexing.
+  Verification returned `Records=1`, `PreservedAuthorization=1`,
+  `PreservedPrompt=1`, and `CompleteChunks=1`.
+- **Cleanup:** The synthetic validation Blob was deleted. No real credential
+  was committed; initial Log Analytics indexing took several minutes.
