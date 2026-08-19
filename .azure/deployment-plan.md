@@ -118,7 +118,7 @@ GitHub Enterprise
 | Component | Azure Service | SKU / Configuration |
 |-----------|---------------|---------------------|
 | Event processor | Azure Functions | Flex Consumption FC1, Python 3.12, scale to zero |
-| Trigger | Event Grid system topic/subscription | BlobCreated, container prefix and `.json.log.gz` suffix filters |
+| Trigger | Existing or new Event Grid system topic/subscription | Reuse the tracked source topic when named; BlobCreated, container prefix and `.json.log.gz` suffix filters |
 | Runtime state/package | Storage Account | StorageV2 Standard LRS, private containers |
 | Monitoring | Workspace-based Application Insights | Payload-free operational telemetry |
 | Security monitoring store | Log Analytics Workspace | Pay-as-you-go, 30-day POC retention |
@@ -221,7 +221,7 @@ resource group.
 | `Microsoft.OperationalInsights/workspaces/tables` | 1 | 1 planned | 800/type/resource group | One custom table |
 | `Microsoft.OperationsManagement/solutions` | 1 | 1 in West US 2 | 800/type/resource group | Enables Sentinel; current regional solutions 0 |
 | `Microsoft.Insights/workbooks` | 1 | 1 in West US 2 | 800/type/resource group | Current regional workbooks 0 |
-| `Microsoft.EventGrid/systemTopics` | 1 | 1 planned | 800/type/resource group | Existing source storage integration |
+| `Microsoft.EventGrid/systemTopics` | 0 new for target | 1 existing tracked topic | 800/type/resource group | Existing topic reused without modification |
 | Event Grid subscription | 1 | 1 planned | 500/system topic | Filtered BlobCreated delivery |
 | RBAC role assignments | Up to 6 | Up to 144/subscription | 4,000/subscription | Current assignments 138 |
 
@@ -253,6 +253,15 @@ resource group.
 - [x] Make batching chunk-aware with explicit non-truncating oversized behavior
 - [x] Update backfill, workbook, KQL, documentation, CI, and synthetic tests
 - [x] Re-run the complete `azure-validate` workflow
+
+### Approved Deployment Recovery: Existing Event Grid System Topic
+
+- [x] Parameterize reuse of an existing system topic without managing or replacing it
+- [x] Preserve all existing topic subscriptions
+- [x] Make the audit event-subscription name deterministic and environment-specific
+- [x] Keep the container prefix, `.json.log.gz` suffix, and BlobCreated filters
+- [x] Validate fresh-topic and existing-topic Bicep paths
+- [x] Re-run `azure-validate` after the recovery change
 
 ### Phase 2: Execution
 
@@ -289,9 +298,34 @@ resource group.
 - [ ] Verify Event Grid delivery, custom-table ingestion, and workbook queries
 - [ ] Update status to `Deployed`
 
+### Phase 3b: Existing-Topic Recovery Validation
+
+- [x] Invoke `azure-validate`
+- [x] AZD preview reuses `ypycopilottest-6a08b4cd-1cb5-4b03-af5d-5cc1ae92f536`
+- [x] ARM validation and what-if pass without topic replacement or deletion
+- [x] Bicep, hooks, package, tests, config, and diff checks pass
+- [x] Restore status to `Validated` and record fresh proof
+
 ---
 
 ## 8. Validation Proof
+
+### Existing-topic recovery validation
+
+| Check | Command Run | Result | Timestamp |
+|-------|-------------|--------|-----------|
+| AZD/auth/context | `azd version`; `azd auth login --check-status`; `az account show` | Passed; approved subscription authenticated | 2026-08-19T11:41:32+08:00 |
+| Existing topic inspection | `az eventgrid system-topic show`; `az eventgrid system-topic event-subscription list` | Topic/source/type succeeded; only `StorageAntimalwareSubscription` exists and remains untouched | 2026-08-19T11:41:32+08:00 |
+| Provision preview | Process-scoped `EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME=...`; `azd provision --preview --no-prompt` | Passed; existing system topic omitted from managed changes; no resources applied | 2026-08-19T11:41:32+08:00 |
+| Existing-topic ARM validation | `az deployment sub validate ... existingEventGridSystemTopicName=...` | Succeeded; correlation `e851abb3-ec9d-4597-9b58-0fdc4d761ae1` | 2026-08-19T11:41:32+08:00 |
+| Fresh-topic ARM validation | `az deployment group validate ... existingEventGridSystemTopicName=''` against a storage account without a tracked topic | Succeeded; correlation `f43c6dd8-4f13-4996-8f44-8658322a0b6e` | 2026-08-19T11:41:32+08:00 |
+| What-if | `az deployment sub what-if ... existingEventGridSystemTopicName=...` | Passed; 5 creates, 12 nested deploys, 30 ignores, 0 deletes; all Event Grid topics ignored | 2026-08-19T11:41:32+08:00 |
+| Build/package/tests | Bicep build/lint; Ruff; Mypy; 35 tests; `azd package` | Passed | 2026-08-19T11:41:32+08:00 |
+| Config/hooks/security | JSON/YAML parsing; PowerShell parser; `sh -n`; dependency and credential scans; `git diff --check` | Passed | 2026-08-19T11:41:32+08:00 |
+
+**Validated by:** `azure-validate`
+
+### Full-audit revision validation
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
@@ -364,8 +398,9 @@ only for traceability.
 
 ## 10. Current Step
 
-Validation is complete. Await explicit deployment approval; do not deploy Azure
-resources.
+Validation is complete. The parent deployment session may resume only after
+setting `EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME`; this child session must not
+deploy.
 
 ---
 
@@ -391,11 +426,32 @@ resources.
 
 ## 12. Remaining Deployment Prerequisites
 
-- Register `Microsoft.OperationsManagement` and `Microsoft.SecurityInsights`;
-  both are currently `NotRegistered`. Registration was intentionally not
-  performed during preparation because it changes subscription configuration.
+- Set `EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME` to
+  `ypycopilottest-6a08b4cd-1cb5-4b03-af5d-5cc1ae92f536` in the active AZD
+  environment before rerunning provision.
+- `Microsoft.OperationsManagement` and `Microsoft.SecurityInsights` are now
+  registered following the explicitly approved partial provisioning attempt.
 - The deployment principal needs Contributor plus role-assignment write access
   on `aks-test` and permission to read Function host system keys for the
   BlobTrigger Event Grid postdeploy hook.
-- Obtain explicit deployment approval before invoking `azure-deploy`. No Azure
-  resources were created or modified during preparation or validation.
+- The failed provision already created the tagged Function, Application
+  Insights, Log Analytics workspace, runtime storage account, Flex plan, and
+  Direct DCR. Rerun provisioning only from the parent deployment workflow.
+
+---
+
+## 13. Deployment Recovery Evidence
+
+- Failed operation: approved `azd provision --no-prompt`.
+- Failure: Azure rejected a second tracked system topic because storage accounts
+  allow only one.
+- Existing topic:
+  `ypycopilottest-6a08b4cd-1cb5-4b03-af5d-5cc1ae92f536`, `Succeeded`,
+  `westus2`, source `ypycopilottest`, type
+  `Microsoft.Storage.StorageAccounts`.
+- Existing subscription: `StorageAntimalwareSubscription`, `Succeeded`; it
+  receives BlobCreated/BlobRenamed BlockBlob events and is not managed by this
+  repository.
+- Planned audit subscription:
+  `egsub-copilot-audit-fgymbaw6iea7`, scoped to the existing topic. The hook
+  creates or updates only this name and leaves all other subscriptions intact.

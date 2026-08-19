@@ -22,6 +22,9 @@
     },
     "sourceContainerName": {
       "value": "github-copilot-audit-log"
+    },
+    "existingEventGridSystemTopicName": {
+      "value": "${EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME}"
     }
   }
 }

@@ -23,6 +23,9 @@ param sourceStorageAccountName string = 'ypycopilottest'
 @description('Existing blob container that receives GitHub Copilot audit logs.')
 param sourceContainerName string = 'github-copilot-audit-log'
 
+@description('Existing Event Grid system topic for the source account. Empty creates a new topic.')
+param existingEventGridSystemTopicName string = ''
+
 param processorServiceName string = ''
 param applicationInsightsName string = ''
 param appServicePlanName string = ''
@@ -52,6 +55,7 @@ module infrastructure 'resources.bicep' = {
     sourceStorageAccountResourceId: sourceStorageAccount.id
     sourceBlobServiceUri: sourceStorageAccount.properties.primaryEndpoints.blob
     sourceContainerName: sourceContainerName
+    existingEventGridSystemTopicName: existingEventGridSystemTopicName
     processorServiceName: processorServiceName
     applicationInsightsName: applicationInsightsName
     appServicePlanName: appServicePlanName
@@ -81,4 +85,5 @@ output LOGS_INGESTION_ENDPOINT string = infrastructure.outputs.logsIngestionEndp
 output DATA_COLLECTION_RULE_IMMUTABLE_ID string = infrastructure.outputs.dataCollectionRuleImmutableId
 output DATA_COLLECTION_STREAM_NAME string = infrastructure.outputs.dataCollectionStreamName
 output EVENT_GRID_SYSTEM_TOPIC_NAME string = infrastructure.outputs.eventGridSystemTopicName
+output EVENT_GRID_SUBSCRIPTION_NAME string = infrastructure.outputs.eventGridSubscriptionName
 output SOURCE_CONTAINER_NAME string = infrastructure.outputs.sourceContainerName

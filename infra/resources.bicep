@@ -3,6 +3,7 @@ param location string
 param sourceStorageAccountResourceId string
 param sourceBlobServiceUri string
 param sourceContainerName string
+param existingEventGridSystemTopicName string = ''
 param processorServiceName string = ''
 param applicationInsightsName string = ''
 param appServicePlanName string = ''
@@ -23,6 +24,7 @@ var storageName = !empty(runtimeStorageAccountName) ? runtimeStorageAccountName 
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(resourceToken, 7)}'
 var dcrName = 'dcr-copilot-audit-${take(resourceToken, 12)}'
 var systemTopicName = 'egst-copilot-audit-${take(resourceToken, 12)}'
+var auditEventSubscriptionName = 'egsub-copilot-audit-${take(resourceToken, 12)}'
 var streamName = 'Custom-GitHubCopilotAudit_CL'
 var workspaceResourceId = resourceId('Microsoft.OperationalInsights/workspaces', workspaceName)
 
@@ -281,7 +283,9 @@ module rbac 'app/rbac.bicep' = {
   ]
 }
 
-resource blobCreatedSystemTopic 'Microsoft.EventGrid/systemTopics@2022-06-15' = {
+// A storage account supports one tracked system topic. Supplying an existing
+// topic name keeps that topic and every subscription outside this deployment.
+resource blobCreatedSystemTopic 'Microsoft.EventGrid/systemTopics@2022-06-15' = if (empty(existingEventGridSystemTopicName)) {
   name: systemTopicName
   location: location
   tags: tags
@@ -298,5 +302,6 @@ output logAnalyticsWorkspaceName string = workspaceName
 output logsIngestionEndpoint string = dataCollectionRule.properties.endpoints.logsIngestion
 output dataCollectionRuleImmutableId string = dataCollectionRule.properties.immutableId
 output dataCollectionStreamName string = streamName
-output eventGridSystemTopicName string = blobCreatedSystemTopic.name
+output eventGridSystemTopicName string = !empty(existingEventGridSystemTopicName) ? existingEventGridSystemTopicName : systemTopicName
+output eventGridSubscriptionName string = auditEventSubscriptionName
 output sourceContainerName string = sourceContainerName

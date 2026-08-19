@@ -145,14 +145,24 @@ azd auth login
 azd env new copilot-audit-poc
 azd env set AZURE_SUBSCRIPTION_ID 3456866f-6478-471f-8d59-a29a335d797a
 azd env set AZURE_LOCATION westus2
+azd env set EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME ypycopilottest-6a08b4cd-1cb5-4b03-af5d-5cc1ae92f536
 azd provision --no-prompt
 azd deploy --no-prompt
 ```
 
+The source account already has the tracked system topic shown above. Supplying
+its name makes Bicep treat Event Grid as existing: the deployment neither
+updates nor replaces that topic or its `StorageAntimalwareSubscription`.
+For a source storage account without a tracked topic, leave
+`EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME` unset or empty and Bicep creates one.
+
 The split sequence allows managed-identity RBAC propagation. The postdeploy
 hook retrieves the platform-generated `blobs_extension` key only in memory to
-configure the filtered BlobTrigger webhook; it never prints, commits, exports,
-or stores that key in application settings.
+create or update only this environment's deterministic
+`egsub-copilot-audit-<token>` subscription. It leaves every other subscription
+untouched and applies only BlobCreated events under
+`github-copilot-audit-log` ending in `.json.log.gz`. The hook never prints,
+commits, exports, or stores the key in application settings.
 
 ## Operations
 
