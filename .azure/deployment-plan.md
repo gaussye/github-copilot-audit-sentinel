@@ -263,6 +263,15 @@ resource group.
 - [x] Validate fresh-topic and existing-topic Bicep paths
 - [x] Re-run `azure-validate` after the recovery change
 
+### Approved Deployment Recovery: Flex OneDeploy Storage Access
+
+- [x] Verify official Flex/OneDeploy deployment-storage identity and networking requirements
+- [x] Reconcile deployed storage drift with the Bicep template and deployment history
+- [x] Keep shared keys and public anonymous Blob access disabled
+- [x] Keep deployment authentication on the Function system-assigned identity
+- [x] Enable only the supported storage network path required by OneDeploy
+- [x] Re-run `azure-validate` after the storage recovery change
+
 ### Phase 2: Execution
 
 - [x] Load Azure Functions template selection and composition rules
@@ -306,9 +315,32 @@ resource group.
 - [x] Bicep, hooks, package, tests, config, and diff checks pass
 - [x] Restore status to `Validated` and record fresh proof
 
+### Phase 3c: OneDeploy Storage Recovery Validation
+
+- [x] Invoke `azure-validate`
+- [x] AZD preview preserves managed-identity deployment and enables storage reachability
+- [x] ARM validation and what-if retain the narrow policy exclusion
+- [x] Bicep, package, tests, config, security, and diff checks pass
+- [x] Restore status to `Validated` and record fresh proof
+
 ---
 
 ## 8. Validation Proof
+
+### OneDeploy storage recovery validation
+
+| Check | Command Run | Result | Timestamp |
+|-------|-------------|--------|-----------|
+| Official configuration research | Microsoft Flex deployment settings; Flex AVM sample; Python AZD secure-network template; Storage trusted-services list | Confirmed public endpoint is required without VNet/private endpoint; service uses configured Function MI; trusted-services bypass does not include OneDeploy | 2026-08-19T12:07:57+08:00 |
+| Live drift/policy | Nested deployment parameters; live storage properties; policy state and definition | Template requested `Enabled`; inherited modify policy forced `Disabled`; policy explicitly excludes `SecurityControl=Ignore` resources | 2026-08-19T12:07:57+08:00 |
+| Provision preview | Process-scoped existing-topic input; `azd provision --preview --no-prompt` | Passed; storage changes from public network disabled to enabled and OAuth default false to true; no resources applied | 2026-08-19T12:07:57+08:00 |
+| ARM validation | `az deployment sub validate ...` | Succeeded; correlation `bd191c81-be35-40b9-9577-b069e8dcbb55` | 2026-08-19T12:07:57+08:00 |
+| What-if | `az deployment sub what-if ... --result-format FullResourcePayloads` | Passed; exact storage deltas are `publicNetworkAccess: Disabled -> Enabled` and `defaultToOAuthAuthentication: false -> true`; zero deletes | 2026-08-19T12:07:57+08:00 |
+| Security invariants | IaC/static RBAC review | Shared keys and anonymous Blob access remain disabled; TLS 1.2; Function MI deployment authentication and scoped Blob/Queue roles unchanged; no deployer data role | 2026-08-19T12:07:57+08:00 |
+| Build/package/tests | Bicep build/lint; Ruff; Mypy; 35 tests; `azd package` | Passed | 2026-08-19T12:07:57+08:00 |
+| Config/dependencies/secrets | JSON/YAML parsing; dependency and credential scans; `git diff --check` | Passed | 2026-08-19T12:07:57+08:00 |
+
+**Validated by:** `azure-validate`
 
 ### Existing-topic recovery validation
 
@@ -398,9 +430,8 @@ only for traceability.
 
 ## 10. Current Step
 
-Validation is complete. The parent deployment session may resume only after
-setting `EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME`; this child session must not
-deploy.
+Validation is complete. The parent deployment session may reprovision and retry
+deployment; this child session must not deploy.
 
 ---
 
@@ -455,3 +486,25 @@ deploy.
 - Planned audit subscription:
   `egsub-copilot-audit-fgymbaw6iea7`, scoped to the existing topic. The hook
   creates or updates only this name and leaves all other subscriptions intact.
+
+### Flex OneDeploy storage 403
+
+- The successful nested `runtime-storage` deployment received
+  `publicNetworkAccess=Enabled`, `allowSharedKeyAccess=false`, and
+  `networkAcls.defaultAction=Allow`.
+- The inherited `StorageAccount_PublicNetwork_Modify` policy then rewrote the
+  live account to `publicNetworkAccess=Disabled`; `defaultAction=Allow` cannot
+  override that top-level switch.
+- The Function configuration already uses
+  `functionAppConfig.deployment.storage.authentication.type=SystemAssignedIdentity`,
+  and its identity already has Storage Blob Data Owner. The deployment
+  principal does not need a storage data role.
+- Functions/App Service/OneDeploy are not Storage trusted-service bypass
+  entries, so `bypass=AzureServices` cannot solve the 403.
+- The policy definition explicitly excludes a resource tagged
+  `SecurityControl=Ignore`. The dedicated deployment/runtime account now gets
+  only that narrow exclusion, remains `publicNetworkAccess=Enabled`, disables
+  shared keys and anonymous Blob access, defaults clients to OAuth, and
+  requires TLS 1.2.
+- Keeping public network access disabled would require the larger supported
+  design: Flex VNet integration, a Blob private endpoint, and private DNS.

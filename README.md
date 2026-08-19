@@ -31,9 +31,22 @@ GitHub Enterprise audit delivery
 
 Infrastructure is composed from the official Azure Functions
 `blob-eventgrid-trigger-python-azd` AZD/Bicep template. The separate Function
-runtime storage account has shared-key access and public blob access disabled.
-The Function uses its system-assigned identity for runtime storage, source
-container reads, Application Insights authentication, and DCR ingestion.
+runtime storage account has shared-key access and public anonymous Blob access
+disabled. The public storage endpoint remains network-reachable because Flex
+Consumption OneDeploy requires it in this non-VNet architecture; all data-plane
+operations still require Microsoft Entra authorization. The Function uses its
+system-assigned identity for runtime/deployment storage, source container
+reads, Application Insights authentication, and DCR ingestion.
+
+The inherited `StorageAccount_PublicNetwork_Modify` policy normally rewrites
+storage public network access to `Disabled`. Its documented resource-level
+exclusion tag, `SecurityControl=Ignore`, is applied only to the dedicated
+runtime/deployment account so the required `Enabled` setting persists.
+Shared keys, anonymous Blob access, and TLS versions below 1.2 remain disabled,
+and OAuth is the default authentication mode. The deployment principal does
+not receive a storage data role. Environments that cannot permit this narrowly
+scoped endpoint must instead add Flex VNet integration, a Blob private
+endpoint, and private DNS before disabling public network access.
 
 ## Lossless raw-record contract
 

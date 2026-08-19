@@ -72,9 +72,14 @@ module runtimeStorage 'br/public:avm/res/storage/storage-account:0.8.3' = {
   params: {
     name: storageName
     location: location
-    tags: tags
+    // The inherited storage policy explicitly recognizes this resource-scoped
+    // exclusion. OneDeploy requires a reachable Blob endpoint without a VNet.
+    tags: union(tags, {
+      SecurityControl: 'Ignore'
+    })
     allowBlobPublicAccess: false
     allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
     minimumTlsVersion: 'TLS1_2'
     publicNetworkAccess: 'Enabled'
     networkAcls: {
