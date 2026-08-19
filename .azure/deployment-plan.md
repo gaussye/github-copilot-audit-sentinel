@@ -101,7 +101,9 @@ network-deny policy was detected.
 GitHub Enterprise
   -> existing private Blob container
   -> BlobCreated Event Grid subscription (*.json.log.gz)
-  -> Python Azure Function (Flex Consumption)
+  -> Python EventGridTrigger Function (Flex Consumption)
+       -> validate exact approved event type/source/path
+       -> download approved blob with system managed identity
        -> parse gzip/plain JSON and JSON Lines
        -> preserve original record text or an explicit lossless encoding
        -> parse nested body JSON for normalized metadata
@@ -180,12 +182,11 @@ mixed into the selected complete version. No chunk is silently truncated.
 - Required runtime storage data roles scoped to the new Function storage
   account.
 - `Monitoring Metrics Publisher` scoped to the DCR.
-- Event Grid delivery authorization scoped only to the Function endpoint.
+- The Event Grid subscription targets only the exact
+  `process_blob_upload` Function resource ID.
 - No Key Vault is needed because the design has no application secrets.
-- The Functions platform-generated `blobs_extension` system key is retrieved
-  transiently by the official-template postdeploy hook because event-based Blob
-  triggers require the blob-extension webhook. It is not committed, logged,
-  exported, or stored in application settings.
+- The postdeploy hook uses the native `azurefunction` endpoint type. It does not
+  retrieve a Function host key or construct a secret-bearing webhook URL.
 
 ### Workbook
 
@@ -272,6 +273,17 @@ resource group.
 - [x] Enable only the supported storage network path required by OneDeploy
 - [x] Re-run `azure-validate` after the storage recovery change
 
+### Approved Deployment Recovery: Native Event Grid Trigger
+
+- [x] Replace the unsupported Event Grid-backed BlobTrigger endpoint with EventGridTrigger
+- [x] Validate event type, account, container, subject, URL, and suffix before download
+- [x] Download only approved blobs with the Function system identity and existing reader role
+- [x] Preserve blob/decompression size limits, safe telemetry, and retry propagation
+- [x] Use native `azurefunction` subscription destination with no host key or secret URL
+- [x] Make PowerShell and POSIX Azure CLI failures terminate before success output
+- [x] Add synthetic trigger-validation, rejection, and download-failure tests
+- [x] Re-run `azure-validate` after the trigger recovery
+
 ### Phase 2: Execution
 
 - [x] Load Azure Functions template selection and composition rules
@@ -323,9 +335,33 @@ resource group.
 - [x] Bicep, package, tests, config, security, and diff checks pass
 - [x] Restore status to `Validated` and record fresh proof
 
+### Phase 3d: Native EventGridTrigger Recovery Validation
+
+- [x] Invoke `azure-validate`
+- [x] Confirm AZD packages the native `EventGridTrigger` entrypoint
+- [x] Confirm ARM validation and what-if retain the existing system topic
+- [x] Confirm no host-key, webhook-secret, or deployment-principal data access
+- [x] Restore status to `Validated` and record fresh proof
+
 ---
 
 ## 8. Validation Proof
+
+### Native EventGridTrigger recovery validation
+
+| Check | Command Run | Result | Timestamp |
+|-------|-------------|--------|-----------|
+| AZD/auth/context | `azd version`; `azd auth login --check-status`; `azd env get-values`; `az account show` | Passed; AZD 1.28.1, approved subscription authenticated, `westus2`, existing-topic input present | 2026-08-19T13:05:00+08:00 |
+| Provision preview | `azd provision --preview --no-prompt` | Passed; preview only, no resources applied | 2026-08-19T13:05:00+08:00 |
+| Native trigger metadata | Python v2 function-index metadata assertion | Passed; sole function is `process_blob_upload` with `eventGridTrigger` input binding | 2026-08-19T13:05:00+08:00 |
+| Existing topic inspection | `az eventgrid system-topic show`; `az eventgrid system-topic event-subscription list` | Existing `ypycopilottest-6a08b4cd-1cb5-4b03-af5d-5cc1ae92f536` succeeded; unrelated `StorageAntimalwareSubscription` remains present | 2026-08-19T13:05:00+08:00 |
+| ARM validation | `az deployment sub validate ... environmentName=audit-sentinel-a8f2 location=westus2 existingEventGridSystemTopicName=...` | Succeeded; correlation `c9ab9637-299c-4ce2-a7a0-323d91f430ff` | 2026-08-19T13:05:00+08:00 |
+| What-if | `az deployment sub what-if ... --result-format ResourceIdOnly` | Passed; 5 creates, 12 nested deployments, 31 ignores, zero deletes; target Event Grid topic explicitly ignored | 2026-08-19T13:05:00+08:00 |
+| Build/package/tests | Bicep build/lint; Ruff format/check; Mypy; 49 synthetic tests; `azd package` | Passed; Function package produced successfully | 2026-08-19T13:05:00+08:00 |
+| Dependency/config/hooks | `pip-audit`; JSON/YAML parsing; PowerShell parser; `sh -n`; `git diff --check` | Passed; no known dependency vulnerabilities or syntax failures | 2026-08-19T13:05:00+08:00 |
+| Security/policy/RBAC | Credential-pattern scan; obsolete webhook/key scan; enforced-policy review; static role review | Passed; no secrets or host-key/webhook flow; source read remains container-scoped; runtime/DCR roles remain resource-scoped | 2026-08-19T13:05:00+08:00 |
+
+**Validated by:** `azure-validate`
 
 ### OneDeploy storage recovery validation
 
@@ -419,7 +455,7 @@ only for traceability.
 | `README.md` | Architecture, setup, security, and operations | Complete |
 | `azure.yaml` | AZD service definition and Event Grid postdeploy hook | Complete |
 | `infra/` | Bicep resources, RBAC, Direct DCR, Sentinel, workbook | Complete |
-| `src/function_app.py` | Event Grid Blob trigger entrypoint | Complete |
+| `src/function_app.py` | Native EventGridTrigger entrypoint and managed-identity Blob download | Complete |
 | `src/copilot_audit/` | Parser, transform, normalizer, schema, ingestion client | Complete |
 | `sentinel/` | KQL hunting and analytics queries | Complete |
 | `scripts/backfill.py` | Explicit historical replay | Complete |
@@ -430,8 +466,8 @@ only for traceability.
 
 ## 10. Current Step
 
-Validation is complete. The parent deployment session may reprovision and retry
-deployment; this child session must not deploy.
+Return the validated native EventGridTrigger recovery to the parent deployment
+session. This child session must not deploy.
 
 ---
 
@@ -442,9 +478,11 @@ deployment; this child session must not deploy.
   commit `6f6f56222c1e2d09226af2c686d4be18fc632264`.
 - **Runtime:** Python 3.12 is supported by the 2026-08-06 Azure Functions
   templates manifest.
-- **Blob delivery:** Current Microsoft guidance requires the blob-extension
-  webhook for an Event Grid-backed Blob trigger; the subscription is therefore
-  configured after code deployment by the official-template composition hook.
+- **Blob delivery:** A native Event Grid `azurefunction` destination requires an
+  actual `EventGridTrigger`; Event Grid rejects an Event Grid-backed
+  `BlobTrigger` as an unsupported destination trigger. The Function therefore
+  validates the approved storage event and downloads the Blob with its system
+  identity before invoking the existing parser and ingestion pipeline.
 - **Logs ingestion:** Direct DCR API `2024-03-11` supplies its own Logs
   Ingestion endpoint; a DCE is not required without Azure Monitor Private Link.
 - **Backend verification:** Parser, lossless transform, normalizer, batching, bounded backfill,
@@ -459,15 +497,18 @@ deployment; this child session must not deploy.
 
 - Set `EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME` to
   `ypycopilottest-6a08b4cd-1cb5-4b03-af5d-5cc1ae92f536` in the active AZD
-  environment before rerunning provision.
+  environment before rerunning provision; it is already set in the validated
+  `audit-sentinel-a8f2` environment.
 - `Microsoft.OperationsManagement` and `Microsoft.SecurityInsights` are now
   registered following the explicitly approved partial provisioning attempt.
 - The deployment principal needs Contributor plus role-assignment write access
-  on `aks-test` and permission to read Function host system keys for the
-  BlobTrigger Event Grid postdeploy hook.
+  on `aks-test`. Function host-system-key read access is not required.
 - The failed provision already created the tagged Function, Application
   Insights, Log Analytics workspace, runtime storage account, Flex plan, and
-  Direct DCR. Rerun provisioning only from the parent deployment workflow.
+  Direct DCR. The parent must rerun `azd provision --no-prompt` to apply the new
+  source-validation app settings, then run `azd deploy --no-prompt`. The
+  postdeploy hook will target
+  `/subscriptions/3456866f-6478-471f-8d59-a29a335d797a/resourceGroups/aks-test/providers/Microsoft.Web/sites/func-fgymbaw6iea7g/functions/process_blob_upload`.
 
 ---
 
@@ -508,3 +549,18 @@ deployment; this child session must not deploy.
   requires TLS 1.2.
 - Keeping public network access disabled would require the larger supported
   design: Flex VNet integration, a Blob private endpoint, and private DNS.
+
+### Native Event Grid trigger correction
+
+- Event Grid rejected a native `azurefunction` destination targeting the
+  previous Event Grid-backed `BlobTrigger` because only an actual
+  `EventGridTrigger` is supported for that destination type.
+- `process_blob_upload` is now a native Python v2 `EventGridTrigger`. It accepts
+  no Blob URL until event type, source topic, HTTPS account hostname, container,
+  suffix, subject, and subject/URL equality pass validation.
+- The Function downloads only the validated Blob with `BlobClient`,
+  `DefaultAzureCredential`, and its existing container-scoped Storage Blob Data
+  Reader role. Processing and ingestion failures remain retryable.
+- The hooks use the exact Function resource ID with endpoint type
+  `azurefunction`; they retrieve no host key and create no secret URL. Checked
+  native-command wrappers prevent success output after a CLI failure.

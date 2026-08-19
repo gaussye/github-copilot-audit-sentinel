@@ -53,7 +53,7 @@ module infrastructure 'resources.bicep' = {
     environmentName: environmentName
     location: location
     sourceStorageAccountResourceId: sourceStorageAccount.id
-    sourceBlobServiceUri: sourceStorageAccount.properties.primaryEndpoints.blob
+    sourceStorageAccountName: sourceStorageAccountName
     sourceContainerName: sourceContainerName
     existingEventGridSystemTopicName: existingEventGridSystemTopicName
     processorServiceName: processorServiceName

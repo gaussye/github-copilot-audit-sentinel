@@ -13,7 +13,9 @@ param storageAccountName string
 param deploymentStorageContainerName string
 param instanceMemoryMB int = 2048
 param maximumInstanceCount int = 100
-param sourceBlobServiceUri string
+param sourceStorageAccountResourceId string
+param sourceStorageAccountName string
+param sourceContainerName string
 param logsIngestionEndpoint string
 param dcrImmutableId string
 param dcrStreamName string
@@ -34,8 +36,9 @@ var appSettings = {
   AzureWebJobsStorage__queueServiceUri: storageAccount.properties.primaryEndpoints.queue
   APPLICATIONINSIGHTS_AUTHENTICATION_STRING: 'Authorization=AAD'
   APPLICATIONINSIGHTS_CONNECTION_STRING: applicationInsights.properties.?ConnectionString ?? ''
-  SourceStorage__blobServiceUri: sourceBlobServiceUri
-  SourceStorage__credential: 'managedidentity'
+  SOURCE_STORAGE_ACCOUNT_RESOURCE_ID: sourceStorageAccountResourceId
+  SOURCE_STORAGE_ACCOUNT_NAME: sourceStorageAccountName
+  SOURCE_CONTAINER_NAME: sourceContainerName
   LOGS_INGESTION_ENDPOINT: logsIngestionEndpoint
   DCR_IMMUTABLE_ID: dcrImmutableId
   DCR_STREAM_NAME: dcrStreamName

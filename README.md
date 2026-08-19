@@ -17,7 +17,9 @@ for efficient hunting and dashboards.
 GitHub Enterprise audit delivery
   -> ypycopilottest/github-copilot-audit-log
   -> Event Grid BlobCreated (*.json.log.gz)
-  -> Python 3.12 Azure Function (Flex Consumption, system identity)
+  -> Python 3.12 EventGridTrigger Function (Flex Consumption, system identity)
+       -> validate exact event type, topic, account, container, subject, and suffix
+       -> download approved blob with managed identity
        -> gzip/plain detection
        -> JSON object, array, or JSON Lines parsing
        -> exact/raw record retention with explicit encoding
@@ -37,6 +39,15 @@ Consumption OneDeploy requires it in this non-VNet architecture; all data-plane
 operations still require Microsoft Entra authorization. The Function uses its
 system-assigned identity for runtime/deployment storage, source container
 reads, Application Insights authentication, and DCR ingestion.
+
+The application entrypoint is a native Python v2 `EventGridTrigger`, rather
+than an Event Grid-backed `BlobTrigger`, because Event Grid accepts native
+`azurefunction` destinations only for Event Grid trigger functions. It
+validates the event against the approved storage resource ID, account,
+container, HTTPS Blob URL, subject, and `.json.log.gz` suffix before creating a
+`BlobClient`. The client then downloads the approved blob with
+`DefaultAzureCredential` and the Function system identity. URLs containing a
+query string or SAS are rejected.
 
 The inherited `StorageAccount_PublicNetwork_Modify` policy normally rewrites
 storage public network access to `Disabled`. Its documented resource-level
@@ -170,12 +181,13 @@ For a source storage account without a tracked topic, leave
 `EXISTING_EVENT_GRID_SYSTEM_TOPIC_NAME` unset or empty and Bicep creates one.
 
 The split sequence allows managed-identity RBAC propagation. The postdeploy
-hook retrieves the platform-generated `blobs_extension` key only in memory to
-create or update only this environment's deterministic
-`egsub-copilot-audit-<token>` subscription. It leaves every other subscription
-untouched and applies only BlobCreated events under
-`github-copilot-audit-log` ending in `.json.log.gz`. The hook never prints,
-commits, exports, or stores the key in application settings.
+hook creates or updates only this environment's deterministic
+`egsub-copilot-audit-<token>` subscription. It uses Event Grid's native
+`azurefunction` endpoint type and the exact
+`.../sites/<app>/functions/process_blob_upload` resource ID, so it retrieves no
+host key and constructs no secret-bearing webhook URL. It leaves every other
+subscription untouched and applies only BlobCreated events under
+`github-copilot-audit-log` ending in `.json.log.gz`.
 
 ## Operations
 

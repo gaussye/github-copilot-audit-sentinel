@@ -1,7 +1,7 @@
 param environmentName string
 param location string
 param sourceStorageAccountResourceId string
-param sourceBlobServiceUri string
+param sourceStorageAccountName string
 param sourceContainerName string
 param existingEventGridSystemTopicName string = ''
 param processorServiceName string = ''
@@ -263,7 +263,9 @@ module processor 'app/processor.bicep' = {
     runtimeVersion: '3.12'
     storageAccountName: storageName
     deploymentStorageContainerName: deploymentStorageContainerName
-    sourceBlobServiceUri: sourceBlobServiceUri
+    sourceStorageAccountResourceId: sourceStorageAccountResourceId
+    sourceStorageAccountName: sourceStorageAccountName
+    sourceContainerName: sourceContainerName
     logsIngestionEndpoint: dataCollectionRule.properties.endpoints.logsIngestion
     dcrImmutableId: dataCollectionRule.properties.immutableId
     dcrStreamName: streamName
