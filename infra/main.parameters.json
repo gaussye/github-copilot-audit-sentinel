@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "resourceGroupName": {
+      "value": "aks-test"
+    },
+    "sourceSubscriptionId": {
+      "value": "3456866f-6478-471f-8d59-a29a335d797a"
+    },
+    "sourceResourceGroupName": {
+      "value": "aks-test"
+    },
+    "sourceStorageAccountName": {
+      "value": "ypycopilottest"
+    },
+    "sourceContainerName": {
+      "value": "github-copilot-audit-log"
+    }
+  }
+}

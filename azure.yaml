@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: github-copilot-audit-sentinel
+metadata:
+  template: blob-eventgrid-trigger-python-azd
+hooks:
+  postdeploy:
+    windows:
+      shell: pwsh
+      run: ./scripts/postdeploy-eventgrid.ps1
+      interactive: false
+      continueOnError: false
+    posix:
+      shell: sh
+      run: ./scripts/postdeploy-eventgrid.sh
+      interactive: false
+      continueOnError: false
+services:
+  processor:
+    project: ./src
+    language: python
+    host: function

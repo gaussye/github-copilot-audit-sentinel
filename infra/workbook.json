@@ -1,0 +1,109 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# GitHub Copilot Audit\n\nOperational visibility for ingested GitHub Copilot audit events."
+      },
+      "name": "title"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(24h)\n| summarize Events=count(), UniqueEvents=dcount(EventId), DuplicateRate=round(100.0 * (1.0 - todouble(dcount(EventId)) / count()), 2)",
+        "size": 4,
+        "title": "24-hour ingestion health",
+        "queryType": 0,
+        "visualization": "tiles"
+      },
+      "name": "ingestion-health"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by bin(TimeGenerated, 1h)\n| render timechart",
+        "size": 0,
+        "title": "Audit event volume",
+        "queryType": 0,
+        "visualization": "timechart"
+      },
+      "name": "event-volume"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by Model, Endpoint\n| top 20 by Events desc\n| render barchart",
+        "size": 0,
+        "title": "Models and endpoints",
+        "queryType": 0,
+        "visualization": "barchart"
+      },
+      "name": "models-endpoints"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by UserId\n| top 20 by Events desc\n| render barchart",
+        "size": 0,
+        "title": "Most active users",
+        "queryType": 0,
+        "visualization": "barchart"
+      },
+      "name": "users"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| extend Tools=parse_json(ToolNames)\n| mv-expand ToolName=Tools to typeof(string)\n| where isnotempty(ToolName)\n| summarize Events=count() by ToolName\n| top 20 by Events desc\n| render piechart",
+        "size": 0,
+        "title": "Tool usage",
+        "queryType": 0,
+        "visualization": "piechart"
+      },
+      "name": "tools"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Events=count() by ParseStatus\n| render piechart",
+        "size": 0,
+        "title": "Parse status",
+        "queryType": 0,
+        "visualization": "piechart"
+      },
+      "name": "parse-status"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces\n| where TimeGenerated >= ago(7d)\n| where Message == \"Audit blob processing failed\"\n| extend Stage=tostring(Properties.stage), ErrorType=tostring(Properties.error_type)\n| summarize Failures=count() by Stage, ErrorType, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc",
+        "size": 0,
+        "title": "Payload-safe pipeline failures",
+        "queryType": 0,
+        "visualization": "table"
+      },
+      "name": "pipeline-failures"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "GitHubCopilotAudit_CL\n| where TimeGenerated >= ago(7d)\n| summarize Total=count(), Unique=dcount(EventId) by bin(TimeGenerated, 1d)\n| extend DuplicateRate=round(100.0 * (1.0 - todouble(Unique) / Total), 2)\n| project TimeGenerated, DuplicateRate\n| render timechart",
+        "size": 0,
+        "title": "Duplicate event rate",
+        "queryType": 0,
+        "visualization": "timechart"
+      },
+      "name": "duplicate-rate"
+    }
+  ],
+  "isLocked": false
+}

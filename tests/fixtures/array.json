@@ -1,0 +1,12 @@
+[
+  {
+    "@timestamp": "2026-08-19T01:02:03Z",
+    "action": "copilot.completion",
+    "actor_id": 101
+  },
+  {
+    "@timestamp": "2026-08-19T01:03:03Z",
+    "action": "copilot.chat",
+    "actor_id": 102
+  }
+]

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Type check
+        run: python -m mypy src scripts
+
+      - name: Unit tests
+        run: python -m pytest
+
+      - name: Dependency audit
+        run: python -m pip_audit -r src/requirements.txt
+
+      - name: Validate Bicep
+        run: az bicep build --file infra/main.bicep
+
+      - name: Reject common credential artifacts
+        shell: bash
+        run: |
+          if git ls-files | grep -E '(^|/)(local\.settings\.json|\.env|.*\.pem|.*\.pfx)$'; then
+            echo "Credential-bearing artifact path is tracked."
+            exit 1
+          fi

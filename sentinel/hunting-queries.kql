@@ -1,0 +1,54 @@
+// Canonical deduplicated view for at-least-once Event Grid delivery.
+let DeduplicatedAudit = materialize(
+    GitHubCopilotAudit_CL
+    | where TimeGenerated >= ago(30d)
+    | summarize arg_max(IngestedAt, *) by EventId
+);
+DeduplicatedAudit
+| summarize Events=count(), Users=dcount(UserId) by bin(TimeGenerated, 1h), EventType
+| order by TimeGenerated desc
+
+// Parse health without exposing malformed content.
+GitHubCopilotAudit_CL
+| where TimeGenerated >= ago(7d)
+| where ParseStatus != "parsed"
+| summarize Records=count(), Bytes=sum(PayloadBytes) by ParseStatus, bin(IngestedAt, 1h)
+| order by IngestedAt desc
+
+// Duplicate deliveries indicate retries or replay activity.
+GitHubCopilotAudit_CL
+| where IngestedAt >= ago(7d)
+| summarize Deliveries=count(), FirstSeen=min(IngestedAt), LastSeen=max(IngestedAt) by EventId
+| where Deliveries > 1
+| order by Deliveries desc
+
+// Unusual hourly volume compared with the prior seven-day hourly baseline.
+let Hourly =
+    GitHubCopilotAudit_CL
+    | where TimeGenerated between (ago(8d) .. now())
+    | summarize Events=dcount(EventId) by bin(TimeGenerated, 1h);
+let Baseline = toscalar(Hourly | where TimeGenerated < ago(1d) | summarize avg(Events));
+Hourly
+| where TimeGenerated >= ago(1d)
+| where Events > max_of(50, Baseline * 3.0)
+| project TimeGenerated, Events, Baseline
+
+// Model and endpoint combinations newly observed in the last day.
+let Known =
+    GitHubCopilotAudit_CL
+    | where TimeGenerated between (ago(30d) .. ago(1d))
+    | summarize by Model, Endpoint;
+GitHubCopilotAudit_CL
+| where TimeGenerated >= ago(1d)
+| summarize Events=dcount(EventId) by Model, Endpoint
+| join kind=leftanti Known on Model, Endpoint
+| order by Events desc
+
+// Tool names are JSON arrays; arguments are never ingested.
+GitHubCopilotAudit_CL
+| where TimeGenerated >= ago(7d)
+| extend Tools=parse_json(ToolNames)
+| mv-expand ToolName=Tools to typeof(string)
+| where isnotempty(ToolName)
+| summarize Events=dcount(EventId), Users=dcount(UserId) by ToolName
+| order by Events desc

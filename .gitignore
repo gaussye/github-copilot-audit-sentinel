@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+htmlcov/
+local.settings.json
+.env
+.azure/*
+!.azure/deployment-plan.md
+*.zip

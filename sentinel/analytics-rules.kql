@@ -1,0 +1,27 @@
+// Candidate scheduled rule: sustained sanitizer/parser degradation.
+// Run every 15 minutes over a 30-minute lookback. Tune threshold before enablement.
+GitHubCopilotAudit_CL
+| where IngestedAt >= ago(30m)
+| summarize Total=count(), Failed=countif(ParseStatus != "parsed")
+| extend FailureRate=iff(Total == 0, 0.0, 100.0 * todouble(Failed) / Total)
+| where Failed >= 10 and FailureRate >= 5.0
+
+// Candidate scheduled rule: high failure response volume for one user.
+// Run hourly over a one-hour lookback. UserId is metadata; no prompts are retained.
+GitHubCopilotAudit_CL
+| where TimeGenerated >= ago(1h)
+| summarize
+    Events=dcount(EventId),
+    Failures=dcountif(EventId, StatusCode >= 400)
+    by UserId, EnterpriseId
+| where Failures >= 25
+| extend FailureRate=100.0 * todouble(Failures) / Events
+| where FailureRate >= 50.0
+
+// Candidate scheduled rule: backfill/retry duplication spike.
+GitHubCopilotAudit_CL
+| where IngestedAt >= ago(1h)
+| summarize Deliveries=count() by EventId
+| summarize TotalDeliveries=sum(Deliveries), UniqueEvents=count(), Duplicated=countif(Deliveries > 1)
+| extend DuplicateRate=100.0 * todouble(TotalDeliveries - UniqueEvents) / TotalDeliveries
+| where Duplicated >= 20 and DuplicateRate >= 10.0

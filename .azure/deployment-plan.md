@@ -1,6 +1,6 @@
 # Azure Deployment Plan
 
-> **Status:** Planning
+> **Status:** Validated
 
 Generated: 2026-08-19
 
@@ -152,6 +152,7 @@ does not receive raw `body` or `headers`.
   remains available in the original blob for authorized investigation.
 - A backfill utility supports explicit historical replay without changing the
   live trigger.
+- Compressed and decompressed payloads are independently capped at 64 MiB.
 
 ### Identity and RBAC
 
@@ -162,6 +163,10 @@ does not receive raw `body` or `headers`.
 - `Monitoring Metrics Publisher` scoped to the DCR.
 - Event Grid delivery authorization scoped only to the Function endpoint.
 - No Key Vault is needed because the design has no application secrets.
+- The Functions platform-generated `blobs_extension` system key is retrieved
+  transiently by the official-template postdeploy hook because event-based Blob
+  triggers require the blob-extension webhook. It is not committed, logged,
+  exported, or stored in application settings.
 
 ### Workbook
 
@@ -217,28 +222,36 @@ resource group.
 - [x] Invoke Azure Quotas and validate capacity
 - [x] Select AZD/Bicep recipe
 - [x] Plan architecture and sensitive-data policy
-- [ ] User approved this plan
+- [x] User approved this plan
 
 ### Phase 2: Execution
 
-- [ ] Load Azure Functions template selection and composition rules
-- [ ] Compose official Flex Consumption + Event Grid Blob trigger templates
-- [ ] Generate Python Function, parser, sanitizer, and ingestion client
-- [ ] Generate Log Analytics table, Direct DCR, Sentinel, and workbook IaC
-- [ ] Add managed identity and least-privilege RBAC
-- [ ] Add unit, parser-fixture, sanitizer, idempotency, and integration tests
-- [ ] Add payload-safe Application Insights telemetry
-- [ ] Add backfill utility and operator documentation
-- [ ] Add CI for lint, type checking, security scanning, and tests
-- [ ] Update status to `Ready for Validation`
+- [x] Load Azure Functions template selection and composition rules
+- [x] Compose official Flex Consumption + Event Grid Blob trigger templates
+- [x] Generate Python Function, parser, sanitizer, and ingestion client
+- [x] Generate Log Analytics table, Direct DCR, Sentinel, and workbook IaC
+- [x] Add managed identity and least-privilege RBAC
+- [x] Add unit, parser-fixture, sanitizer, idempotency, and integration tests
+- [x] Add payload-safe Application Insights telemetry
+- [x] Add backfill utility and operator documentation
+- [x] Add CI for lint, type checking, security scanning, and tests
+- [x] Update status to `Ready for Validation`
 
 ### Phase 3: Validation
 
-- [ ] Invoke `azure-validate`
-- [ ] Verify Bicep, AZD configuration, Python tests, and security controls
-- [ ] Confirm fixtures contain no real audit data or credentials
-- [ ] Update status to `Validated`
-- [ ] Record validation proof below
+- [x] Invoke `azure-validate`
+- [x] All validation checks pass
+  - [x] AZD installation and schema
+  - [x] AZD environment, authentication, subscription, and location
+  - [x] AZD provision preview
+  - [x] Python build, lint, type check, tests, and package
+  - [x] Bicep compilation, lint, template validation, and what-if
+  - [x] Azure Policy compatibility
+  - [x] Static least-privilege role verification
+  - [x] JSON, YAML, hook syntax, dependency, and credential-artifact checks
+- [x] Confirm fixtures contain no real audit data or credentials
+- [x] Update status to `Validated`
+- [x] Record validation proof below
 
 ### Phase 4: Deployment
 
@@ -252,9 +265,19 @@ resource group.
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
-| Pending | Pending validation | Pending | Pending |
+| AZD/auth/context | `azd version`; `azd auth login --check-status`; `azd env get-values`; `az account show` | Passed; AZD 1.28.1, authenticated, approved subscription and `westus2` | 2026-08-19T10:54:25+08:00 |
+| Provision preview | `azd provision --preview --no-prompt` | Passed; preview only, no changes applied | 2026-08-19T10:54:25+08:00 |
+| Bicep | `az bicep build`; `az bicep lint` | Passed without compile or lint errors | 2026-08-19T10:54:25+08:00 |
+| ARM validation | `az deployment sub validate ...` | Succeeded; nested deployments short-circuited only where runtime references are unresolved during validation | 2026-08-19T10:54:25+08:00 |
+| What-if | `az deployment sub what-if ...` | Succeeded; 18 creates, 30 existing resources ignored; no deployment | 2026-08-19T10:54:25+08:00 |
+| Python quality | `ruff format --check`; `ruff check`; `mypy src scripts`; `pytest` | Passed; 26 tests | 2026-08-19T10:54:25+08:00 |
+| Dependency audit | `python -m pip_audit -r src/requirements.txt` | No known vulnerabilities | 2026-08-19T10:54:25+08:00 |
+| Package | `azd package --no-prompt` | Passed; Function package produced in the system temp directory | 2026-08-19T10:54:25+08:00 |
+| Config/hooks | JSON/YAML parsing; PowerShell parser; `sh -n`; `git diff --check` | Passed | 2026-08-19T10:54:25+08:00 |
+| Source/policy/RBAC | Source account/container queries; policy assignment review; role definition verification | Passed; source is StorageV2 in `westus2`; role IDs and least-privilege scopes verified | 2026-08-19T10:54:25+08:00 |
+| Privacy | Credential-pattern/path scans; synthetic fixture scan; sanitizer leakage tests | Passed; no credential artifacts or real audit fixtures | 2026-08-19T10:54:25+08:00 |
 
-**Validated by:** Pending `azure-validate`
+**Validated by:** `azure-validate`
 
 ---
 
@@ -263,19 +286,51 @@ resource group.
 | File | Purpose | Status |
 |------|---------|--------|
 | `.azure/deployment-plan.md` | Source-of-truth plan | Complete |
-| `README.md` | Architecture, setup, privacy, and operations | Planned |
-| `azure.yaml` | AZD service definition | Planned |
-| `infra/` | Bicep resources, RBAC, DCR, Sentinel, workbook | Planned |
-| `src/function_app.py` | Event Grid Blob trigger entrypoint | Planned |
-| `src/copilot_audit/` | Parser, sanitizer, schema, ingestion client | Planned |
-| `sentinel/` | KQL hunting and analytics queries | Planned |
-| `scripts/backfill.py` | Explicit historical replay | Planned |
-| `tests/` | Synthetic fixtures and automated tests | Planned |
-| `.github/workflows/ci.yml` | Pull-request validation | Planned |
+| `README.md` | Architecture, setup, privacy, and operations | Complete |
+| `azure.yaml` | AZD service definition and Event Grid postdeploy hook | Complete |
+| `infra/` | Bicep resources, RBAC, Direct DCR, Sentinel, workbook | Complete |
+| `src/function_app.py` | Event Grid Blob trigger entrypoint | Complete |
+| `src/copilot_audit/` | Parser, sanitizer, schema, ingestion client | Complete |
+| `sentinel/` | KQL hunting and analytics queries | Complete |
+| `scripts/backfill.py` | Explicit historical replay | Complete |
+| `tests/` | Synthetic fixtures and automated tests | Complete |
+| `.github/workflows/ci.yml` | Pull-request validation | Complete |
 
 ---
 
 ## 10. Current Step
 
-Present this plan for user approval. No application code, infrastructure, or
-deployment is permitted until approval is recorded.
+Commit the validated preparation. Do not deploy Azure resources.
+
+---
+
+## 11. Implementation Research and Functional Verification
+
+- **Official template:** `blob-eventgrid-trigger-python-azd` from
+  `Azure-Samples/functions-quickstart-python-azd-eventgrid-blob`, composed at
+  commit `6f6f56222c1e2d09226af2c686d4be18fc632264`.
+- **Runtime:** Python 3.12 is supported by the 2026-08-06 Azure Functions
+  templates manifest.
+- **Blob delivery:** Current Microsoft guidance requires the blob-extension
+  webhook for an Event Grid-backed Blob trigger; the subscription is therefore
+  configured after code deployment by the official-template composition hook.
+- **Logs ingestion:** Direct DCR API `2024-03-11` supplies its own Logs
+  Ingestion endpoint; a DCE is not required without Azure Monitor Private Link.
+- **Backend verification:** Parser, sanitizer, batching, bounded backfill,
+  ingestion propagation, and payload-safe Function failure handling tested
+  locally with synthetic data.
+- **UI verification:** Not applicable; the only UI artifact is the declarative
+  Sentinel workbook, whose JSON and embedded queries were parsed locally.
+
+---
+
+## 12. Remaining Deployment Prerequisites
+
+- Register `Microsoft.OperationsManagement` and `Microsoft.SecurityInsights`;
+  both are currently `NotRegistered`. Registration was intentionally not
+  performed during preparation because it changes subscription configuration.
+- The deployment principal needs Contributor plus role-assignment write access
+  on `aks-test` and permission to read Function host system keys for the
+  BlobTrigger Event Grid postdeploy hook.
+- Obtain explicit deployment approval before invoking `azure-deploy`. No Azure
+  resources were created or modified during preparation or validation.

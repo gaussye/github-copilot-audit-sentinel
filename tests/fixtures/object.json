@@ -1,0 +1,17 @@
+{
+  "@timestamp": "2026-08-19T01:02:03Z",
+  "action": "copilot.completion",
+  "actor_id": 101,
+  "enterprise_id": 202,
+  "request_id": "synthetic-request-1",
+  "endpoint": "/chat/completions",
+  "status_code": 200,
+  "body": "{\"model\":\"synthetic-model\",\"interaction_type\":\"chat\",\"tool_calls\":[{\"function\":{\"name\":\"search\",\"arguments\":{\"prompt\":\"must-not-leak\"}}}],\"prompt\":\"must-not-leak\",\"output\":\"must-not-leak\"}",
+  "headers": {
+    "authorization": "Bearer synthetic-secret"
+  },
+  "ip_address": "192.0.2.10",
+  "device_id": "synthetic-device",
+  "session_id": "synthetic-session",
+  "source_code": "print('must-not-leak')"
+}

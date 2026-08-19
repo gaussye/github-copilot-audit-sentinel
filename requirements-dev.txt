@@ -1,0 +1,7 @@
+-r src/requirements.txt
+azure-storage-blob==12.26.0
+mypy==1.17.1
+pip-audit==2.9.0
+pytest==8.4.1
+ruff==0.12.9
+types-requests==2.32.4.20250809
