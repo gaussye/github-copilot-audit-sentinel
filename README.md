@@ -30,6 +30,19 @@ SAS、PAT、客户端密码或 Log Analytics 共享密钥。
 
 ## 2. 最终架构
 
+[![GitHub Copilot Audit Sentinel 动态架构图](docs/assets/github-copilot-audit-sentinel.gif)](docs/assets/github-copilot-audit-sentinel.png)
+
+> 动态预览展示通知、读取、处理和 ingestion 链路。也可查看
+> [静态 PNG](docs/assets/github-copilot-audit-sentinel.png) 或下载
+> [可编辑 Excalidraw 源文件](docs/assets/github-copilot-audit-sentinel.excalidraw)。
+
+> [!IMPORTANT]
+> Event Grid **只传递 `BlobCreated` 事件元数据和 Blob reference，不搬运 Blob
+> 内容**。Function 收到原生 `EventGridTrigger` 通知并完成严格来源验证后，才使用系统
+> 托管身份通过 `BlobClient` 主动读取 Blob bytes。内容随后由 Function 调用 Logs
+> Ingestion API，DCR 将其路由到 Log Analytics；Microsoft Sentinel 是启用在该
+> Workspace 上的 SIEM 层。
+
 ```mermaid
 flowchart LR
     GHE["GitHub Enterprise<br/>Audit log streaming"]
@@ -52,12 +65,13 @@ flowchart LR
     TABLE["Log Analytics<br/>GitHubCopilotAudit_CL"]
     SENTINEL["Microsoft Sentinel<br/>Workbook + KQL"]
 
-    GHE --> BLOB
-    BLOB --> TOPIC
+    GHE -- "writes compressed audit blobs" --> BLOB
+    BLOB -- "BlobCreated metadata only" --> TOPIC
     TOPIC --> DEFENDER
     TOPIC --> SUB
-    SUB --> TRIGGER
+    SUB -- "native AzureFunction notification" --> TRIGGER
     TRIGGER --> VALIDATE --> DOWNLOAD --> PARSE --> TRANSFORM --> NORMALIZE
+    BLOB -. "MI reads blob bytes" .-> DOWNLOAD
     NORMALIZE --> API --> DCR --> TABLE --> SENTINEL
 ```
 
@@ -67,16 +81,24 @@ flowchart LR
 |---|---|---|
 | 1 | GitHub Enterprise | 将企业审计日志流式写入既有 Blob 容器 |
 | 2 | Blob Storage | 源为 `ypycopilottest/github-copilot-audit-log` |
-| 3 | Event Grid System Topic | 表示存储账户产生的 Azure 资源事件；由审计订阅和 Defender 订阅共享 |
-| 4 | Event Subscription | 只选择目标容器内以 `.json.log.gz` 结尾的 `BlobCreated` |
+| 3 | Event Grid System Topic | 发布存储账户产生的 `BlobCreated` 元数据通知；不承载 Blob bytes；由审计订阅和 Defender 订阅共享 |
+| 4 | Event Subscription | 只选择目标容器内以 `.json.log.gz` 结尾的 `BlobCreated`，并通知原生 Azure Function endpoint |
 | 5 | `process_blob_upload` | 原生 Python v2 `EventGridTrigger`，而不是 BlobTrigger |
 | 6 | 来源验证 | 校验事件类型、topic 资源 ID、HTTPS hostname、容器、subject、URL 和后缀 |
-| 7 | Blob 下载 | 仅在验证通过后，用 Function 系统托管身份下载目标 Blob |
+| 7 | Blob 下载 | 仅在验证通过后，由 Function 使用系统托管身份主动下载目标 Blob；Event Grid 不参与内容传输 |
 | 8 | 解析 | 在内存中处理 gzip 或普通字节、JSON object、array、JSON Lines |
 | 9 | 转换与规范化 | 默认完整保留原文，同时派生常用元数据列 |
 | 10 | 分块与批处理 | 大记录按 UTF-8 安全边界分块；上传批次有记录数和字节数上限 |
-| 11 | Logs Ingestion + Direct DCR | 使用托管身份向自定义流写入，DCR 做最终类型投影 |
-| 12 | Sentinel | 在 `GitHubCopilotAudit_CL` 上运行 Workbook、hunting 和 analytics KQL |
+| 11 | Logs Ingestion + Direct DCR | Function 使用托管身份调用 Logs Ingestion API；DCR 做最终类型投影并路由到 Log Analytics |
+| 12 | Log Analytics + Sentinel | 数据存储在 Workspace 的 `GitHubCopilotAudit_CL`；Sentinel 基于该 Workspace 运行 Workbook、hunting 和 analytics KQL |
+
+从网络和职责上看，这是三条相互关联但不同的路径：
+
+1. **写入路径**：GitHub Enterprise → source Blob。
+2. **通知与读取路径**：Blob `BlobCreated` metadata → Event Grid → native
+   `EventGridTrigger`；Function MI → Blob GET。
+3. **分析路径**：Function → Logs Ingestion API → Direct DCR → Log Analytics
+   Workspace → Sentinel。
 
 ### 2.2 Sentinel、Log Analytics、DCR 与 Function 的职责边界
 
@@ -1044,6 +1066,11 @@ az bicep lint --file .\infra\main.bicep
 ├── .azure/deployment-plan.md       # Azure plan、validation 和 deployment proof
 ├── .github/workflows/ci.yml        # Ruff、Mypy、pytest、pip-audit、Bicep
 ├── azure.yaml                      # AZD service 与 postdeploy hooks
+├── docs/
+│   └── assets/
+│       ├── github-copilot-audit-sentinel.gif        # Animated architecture
+│       ├── github-copilot-audit-sentinel.png        # Static fallback
+│       └── github-copilot-audit-sentinel.excalidraw # Editable source
 ├── infra/
 │   ├── main.bicep                  # Subscription-scope entrypoint
 │   ├── resources.bicep             # Function、LAW、DCR、Sentinel、Workbook
