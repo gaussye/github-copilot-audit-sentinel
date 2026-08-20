@@ -1,20 +1,25 @@
 // Complete, version-safe view for at-least-once Event Grid delivery.
 let CandidateChunks = materialize(
     GitHubCopilotAudit_CL
-    | where TimeGenerated >= ago(30d)
+    | where IngestedAt >= ago(30d)
     | extend
         ChunkIndex=coalesce(RawChunkIndex, 0),
         ChunkCount=coalesce(RawChunkCount, 1),
         ContentVersion=coalesce(RawContentHash, "legacy")
+    | summarize arg_max(IngestedAt, *)
+      by EventId, ContentVersion, ChunkIndex
 );
 let CompleteVersions = materialize(
     CandidateChunks
     | summarize
+        ChunkIndices=make_set(ChunkIndex, 10000),
         LatestIngestedAt=max(IngestedAt),
-        PresentChunks=dcount(ChunkIndex),
         ExpectedChunks=max(ChunkCount)
         by EventId, ContentVersion
-    | where PresentChunks == ExpectedChunks
+    | where ExpectedChunks between (1 .. 10000)
+    | extend ExpectedIndices=range(0, tolong(ExpectedChunks) - 1, 1)
+    | where array_length(set_difference(ExpectedIndices, ChunkIndices)) == 0
+    | where array_length(set_difference(ChunkIndices, ExpectedIndices)) == 0
     | summarize arg_max(LatestIngestedAt, *) by EventId
 );
 let DeduplicatedChunks = materialize(
@@ -41,8 +46,9 @@ DeduplicatedChunks
 | summarize RawEvent=strcat_array(make_list(RawEvent), ""),
             RawEncoding=any(RawEncoding),
             RawContentHash=any(RawContentHash),
-            ActualChunks=dcount(ChunkIndex),
+            ActualChunks=count(),
             ExpectedChunks=max(ChunkCount)
+| where ActualChunks == ExpectedChunks
 
 // Parse health with retained raw content available to authorized investigators.
 DeduplicatedAudit

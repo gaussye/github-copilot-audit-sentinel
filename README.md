@@ -78,6 +78,39 @@ flowchart LR
 | 11 | Logs Ingestion + Direct DCR | 使用托管身份向自定义流写入，DCR 做最终类型投影 |
 | 12 | Sentinel | 在 `GitHubCopilotAudit_CL` 上运行 Workbook、hunting 和 analytics KQL |
 
+### 2.2 Sentinel、Log Analytics、DCR 与 Function 的职责边界
+
+Microsoft Sentinel 不是另一份日志存储。它是启用在专用 Log Analytics Workspace（LAW）
+`log-copilotauditfgymbaw6iea7g` 上的 SIEM 能力层；数据实际存放在该 workspace 的
+`GitHubCopilotAudit_CL` 表中。Sentinel analytics、hunting、Workbook 和日常 KQL
+读取的都是这张表，表级 RBAC、retention 和计费也由 LAW/Sentinel 数据层控制。
+
+**Azure Function 负责内容语义和传输：**
+
+1. 验证 Event Grid 事件只引用获批 storage account、container 和 suffix。
+2. 使用系统托管身份下载 Blob。
+3. 处理 gzip/plain、object/array/JSONL、nested `body`、malformed/binary 等变体。
+4. 执行默认 no-op 的 raw transform，派生规范化字段，并在 UTF-8 安全边界分块。
+5. 以最多 500 rows、750,000 bytes 的请求批次调用 Logs Ingestion API；单 row
+   仍超限时显式失败，不静默截断。
+
+**Direct DCR 负责 Azure Monitor 的写入契约和路由：**
+
+- 输入 stream 是 `Custom-GitHubCopilotAudit_CL`。
+- `streamDeclarations` 声明第 11 节列出的 21 个字段及其 Azure Monitor 类型。
+- `dataFlows.transformKql` 从 `source` 显式 `project` 全部字段，并用
+  `tostring`、`toint`、`tolong`、`todatetime` 做最终类型投影；它不删除 raw 字段。
+- `destinations.logAnalytics` 指向上述 LAW，`outputStream` 仍为
+  `Custom-GitHubCopilotAudit_CL`，因此输出进入 `GitHubCopilotAudit_CL`。
+- 当前 DCR 使用 `2024-03-11` Direct 模式并提供自己的 public Logs Ingestion
+  endpoint；只有未来采用 Private Link 时才需要额外 DCE。
+
+Logs Ingestion API 不能“绕过 DCR 直接写表”。每次调用都必须携带 DCR immutable ID
+和 stream name；DCR 告诉 Azure Monitor 输入 JSON 的结构、允许的转换以及目标
+workspace/table。Function 决定“事件是什么、如何保真”，DCR 决定“Azure Monitor
+如何接收、类型化并路由”。修改表 schema 时必须同步修改 Function 输出、DCR
+`streamDeclarations`、`transformKql` 和目标表，不能只改其中一层。
+
 ## 3. System Topic 与 Event Subscription
 
 **System Topic（系统主题）**代表 Azure 服务本身的事件源。本项目的事件源是存储账户
@@ -146,14 +179,48 @@ RAW_TRANSFORM_POLICY=identity
 
 - `RawEvent`：当前原始内容分块。
 - `RawEncoding`：例如 `utf-8-json`、`gzip+utf-8-jsonl-record`、`base64`。
-- `RawContentHash`：完整转换后内容及编码的 SHA-256 版本标识。
+- `RawContentHash`：分块前完整转换内容及编码的 SHA-256 版本标识。
 - `RawChunkIndex`：从 0 开始的分块序号。
 - `RawChunkCount`：该记录的总分块数。
 
-必须同时按 `EventId` 和 `RawContentHash` 选择同一内容版本，再按 `RawChunkIndex`
-重组，避免重放后新旧分块混合。
+实现位于 `src/copilot_audit/normalizer.py`。算法不是按 Python 字符数切割：先将完整
+transform 输出字符串编码成 UTF-8，再以最多 64,000 bytes 取块；如果边界落入多字节
+code point，边界向前回退到可解码位置。这样每个 `RawEvent` chunk 都是有效字符串，
+同时避免 Azure Monitor 单列/请求尺寸风险。
 
-### 4.4 显式定制转换策略
+两个确定性标识的准确输入如下：
+
+```text
+EventId =
+  SHA256(UTF8(SourceBlob + "\n" + SourceRecordIndex)).hexdigest()
+
+RawContentHash =
+  SHA256(UTF8(RawEncoding + "\0" + CompleteTransformedContent)).hexdigest()
+```
+
+因此 `RawContentHash` 不是对某个 chunk 单独计算，也不只是对 JSON 内容计算；编码标签和
+NUL 分隔符是哈希输入的一部分。同一 source record 的所有 chunks 共享 `EventId`、
+`RawContentHash` 和 `RawChunkCount`，只有 `RawChunkIndex` 不同。
+
+### 4.4 完整性、日常查询与至少一次投递
+
+Event Grid 和 Logs Ingestion 是至少一次处理语义，同一逻辑事件可能产生重复物理 rows。
+本实现没有在写入路径做状态型去重，以免状态故障造成证据丢失。规范如下：
+
+- 物理 chunk 去重键：`(EventId, RawContentHash, RawChunkIndex)`。
+- 日常只看规范化字段时先过滤 `RawChunkIndex == 0`，再按 `EventId` 取最新
+  `IngestedAt`；这只表示“事件出现过”，不证明 raw chunks 完整。
+- 完整性检查必须先按物理 chunk 去重，再比较实际索引集合和
+  `range(0, RawChunkCount - 1)`。只比较 `count()` 或 `dcount()` 可能把
+  `{0, 2}` 错当成一个应有两块的完整版本。
+- 同一 `EventId` 如出现多个 `RawContentHash`，选择最新的**完整**内容版本，而不是把
+  不同版本的 chunks 混合。
+- 重组时按 `RawChunkIndex` 升序连接 `RawEvent`；12.2/12.3 给出 canonical KQL。
+- 重组后如需独立校验，可对 `RawEncoding + NUL + 重组字符串` 的 UTF-8 bytes 再算
+  SHA-256，并与 `RawContentHash` 比较。KQL 用于集合完整性和重组，字节级哈希复核宜在
+  受控调查工具中完成。
+
+### 4.5 显式定制转换策略
 
 如客户后续通过正式数据治理决定删除字段，可在
 `infra/app/processor.bicep` 的 Function app settings 中显式加入：
@@ -735,6 +802,11 @@ immutable policy/versioning 确认内容不会在审批和执行之间改变。
 | `RawChunkIndex` | int | 当前分块序号，从 0 开始 |
 | `RawChunkCount` | int | 该 source record 的总分块数 |
 
+> [!NOTE]
+> Azure Monitor 会把早于接收时间 2 天以上、或晚于接收时间 1 天以上的
+> `TimeGenerated` 替换为实际接收时间。因此历史 backfill 中该规范化列不一定保留 GitHub
+> 原时间；原始 timestamp 仍在受限的 `RawEvent` 中，`IngestedAt` 明确表示本管道处理时间。
+
 ## 12. 常用 KQL
 
 原始内容查询必须先处理 Event Grid at-least-once delivery，并只使用完整的
@@ -1023,10 +1095,261 @@ az bicep lint --file .\infra\main.bicep
 4. 生成明确的 what-if，并确认不会删除 Defender 或其他工作负载资源。
 5. 采用逐资源、可审计的退役计划，而不是资源组级批量删除。
 
-## 19. 官方参考
+## 19. 三种方案对比与决策
+
+本节区分三个容易混淆但目标不同的方案。结论基于 2026-08-20 可访问的 GitHub 和
+Microsoft 官方文档。
+
+### 19.1 方案 A：HNS Blob + Sentinel CCF Azure Storage connector
+
+Microsoft Sentinel 的 Azure Storage Blob connector 基于 Codeless Connector
+Framework（CCF），官方前置条件是 **hierarchical namespace enabled 的 ADLS Gen2**。
+普通 flat namespace Blob 虽然可以接收 GitHub audit log streaming，但不满足该
+connector 前置条件；两者不能因为都叫“Blob”而混为一谈。
+
+CCF 的实际链路是：
+
+```mermaid
+flowchart LR
+    GH["GitHub audit / usage records streaming"]
+    HNS["ADLS Gen2<br/>HNS-enabled container"]
+    EG["Event Grid<br/>BlobCreated"]
+    Q["Storage notification queue<br/>+ dead-letter queue"]
+    CCF["Sentinel CCF connector"]
+    DCR2["DCR mapping / transform"]
+    T["Log Analytics table<br/>Microsoft Sentinel"]
+    GH --> HNS --> EG --> Q --> CCF --> DCR2 --> T
+```
+
+GitHub 的 Azure Blob destination 使用只授予 Create/Write 的 container SAS URL，并从
+stream 启用时开始向前发送；GitHub 官方同样说明 delivery 为 at-least-once，可能出现
+重复。该 producer 侧 SAS 由 GitHub 保存，不进入本项目 Function 代码、app settings
+或仓库。
+
+官方 CCF connector：
+
+- 轮询 queue 中的 blob pointer，成功转发后删除 queue message，queue/DLQ 为
+  backpressure 和高吞吐提供更强的持久缓冲。
+- connector service principal 需要 Blob 上的 `Storage Blob Data Reader` 和 queue
+  上的 `Storage Queue Data Contributor`；租户管理员还需同意 Microsoft-managed
+  multitenant application。
+- 支持 prefix/suffix、JSON/CSV/XML/Parquet、gzip 选项，并配置 DCR mapping/DCE。
+- 官方 troubleshooting 指出连接后首批数据可能约 20–30 分钟才进入 workspace。
+- 如果 source account 已存在其他 Event Grid system topic，官方也提示 connector
+  deployment 可能发生 topic/subscription 冲突，必须像本项目一样盘点并安全复用。
+
+当前 `ypycopilottest` 是普通 flat namespace StorageV2，不满足 HNS 前置条件。改用
+CCF 前必须设计并验证 HNS upgrade 或迁移到新的 HNS-enabled landing zone；不能在当前
+生产源账户上未经评估直接切换。CCF 由 BlobCreated 驱动，也不是一个自动扫描任意历史
+Blob 的 backfill 工具；历史数据仍需有界复制/重放设计。
+
+### 19.2 方案 B：当前 Function + Direct DCR
+
+当前方案直接适配既有 flat namespace Blob，并用客户可审计的 Python 实现格式容错、
+malformed/binary 保留、nested `body` 解析、64,000-byte raw chunk、确定性标识、
+有界 backfill 和自定义 transform。它最符合“安全团队需要所有原始数据可见”的 POC
+要求，也保留源 Blob 作为独立权威 archive。
+
+代价是团队需要运维 Function、Event Grid retry/dead-letter、schema 兼容、测试、
+Logs Ingestion 配额和成本告警。Event Grid 直接投递没有 CCF notification queue 的
+天然 backpressure 层，因此生产强化建议仍包括 dead-letter destination 和失败重放
+runbook。
+
+### 19.3 方案 C：Copilot agent session streaming 到 Microsoft Purview
+
+GitHub 2026-07-02 changelog 将 Copilot agent session streaming 标记为
+**Public Preview**。适用客户为使用 Enterprise Managed Users 的 GitHub Enterprise
+Cloud；其 session records 覆盖 prompts、responses 和 tool calls，并可通过 streaming
+endpoint 或 REST API 访问。REST API 按需范围仅为最近 48 小时。官方 schema 还提供
+`truncated` 标志：`body` 为满足 1 MB document limit 被裁剪时该值为 `true`，因此直接
+Purview 路径不能被描述为无条件字节级完整。
+
+GitHub 当前文档明确把 Microsoft Purview 标注为 **“Copilot agent session events
+only”**。因此 Purview endpoint：
+
+- 适合 Copilot agent session 的合规、调查和数据治理。
+- **不能替代**普通 GitHub audit log / Git event streaming。
+- 不是当前 Blob 历史 archive 的通用 backfill 目的地。
+- 官方资料没有证明 prompts/responses 会自动通过现有 Purview
+  `MicrosoftPurviewInformationProtection` / `DataSensitivity` Sentinel connector
+  进入本项目 LAW。除非后续官方文档明确该链路，否则不能把 Purview 当成已经接通的
+  Sentinel 数据源。
+
+如要让方案 A/B 也接收 agent session records，需要在 GitHub enterprise AI Controls
+中按官方文档启用 `Copilot Usage Records Streaming`，并确认它们写入同一个已配置的
+audit streaming destination。当前 Function 对未知字段默认 raw-preserve，但是否已在
+租户启用该 GitHub 设置必须另行核实，不能从 Azure 部署状态推断。
+
+### 19.4 结构化比较
+
+| 维度 | HNS + Sentinel CCF | 当前 Function + Direct DCR | Purview agent session endpoint |
+|---|---|---|---|
+| 普通 GitHub audit/Git events | 支持，前提是 GitHub 写入 HNS destination | 支持，已验证当前 flat Blob | 不支持；官方限定 agent session only |
+| prompt/response/tool calls | GitHub 启用 usage records streaming 并流向同一 destination 时可接收 | 同左；raw-preserve 未知字段 | 原生目标能力，Public Preview |
+| 历史回灌 | 从启用 streaming 后向前；BlobCreated 驱动，需另行有界 replay/copy | 内置 `backfill.py`，31 天/1000 Blob 上限、dry-run first | Streaming 无初始 backfill 承诺；REST API 仅最近 48 小时 |
+| 原始保真/分块 | CCF 按配置解析再经 DCR；没有本项目的证据级 raw chunk 契约 | 明确保留 malformed/binary/unknown fields 和 UTF-8 chunks | 由 GitHub/Purview preview schema 和 retention 决定 |
+| 转换灵活性 | CCF response mapping + DCR KQL | Python hook/normalizer + DCR，最高 | Purview 产品能力，最低 |
+| 部署复杂度 | HNS、queue、DLQ、Event Grid、CCF consent/RBAC、DCR | Function、runtime storage、Event Grid、MI、DCR | GitHub + Entra/Purview 授权较少，但有资格和许可前置条件 |
+| 运维责任 | Azure 托管 connector，仍需 queue/DLQ/health | 最大；应用、依赖、重试、容量、告警都由团队负责 | 最低但 preview 变更风险最高 |
+| 延迟 | 官方提示初始约 20–30 分钟 | 已实测 ingestion 后数分钟可查，不构成 SLA | 官方未给出本文可引用的确定 SLA |
+| 可靠性 | durable queue 支持 backpressure | Event Grid at-least-once + platform retry；建议补 DLQ | Microsoft/GitHub 托管 preview，具体保证需合同确认 |
+| 查询/告警/Workbook | 原生进入 Sentinel/LAW | 原生进入 Sentinel/LAW，现有 Workbook/KQL | Purview 原生治理；未证实自动进入 Sentinel |
+| 合规治理 | Sentinel RBAC/retention/Policy | Sentinel RBAC + 自定义保真；需要严格控制 raw 表 | Purview 数据治理/eDiscovery 更匹配 |
+| 状态 | Microsoft-managed CCF connector | 已部署并完成 POC E2E | Public Preview |
+| 锁定/可移植性 | 强依赖 Sentinel CCF/DCR | 源 Blob + Python + JSON/KQL，三者中最可移植 | 强依赖 GitHub/Purview preview |
+| 安全 | Microsoft-managed SP、Blob/Queue data roles | 系统 MI；应用不持有共享密钥；raw 表风险最高 | Entra/Purview 授权；租户治理边界需确认 |
+| 主要成本 | HNS/queue/Event Grid + Sentinel ingestion | Blob/Function/Event Grid + Sentinel ingestion | 定价/许可未透明，需租户报价 |
+
+### 19.5 决策
+
+本 POC 选择方案 B，因为它无需迁移现有普通 Blob，能处理已观察到的格式变体，能精确
+保留 malformed/raw 数据，提供显式 chunk 完整性和受控历史 backfill，并已完成真实
+E2E 验证。
+
+- **改选 HNS + CCF**：新建 landing zone 时可要求 HNS；团队更重视 Microsoft-managed
+  queue connector、backpressure 和低代码运维，并接受迁移、CCF schema/raw 保真评估。
+- **并行采用 Purview**：企业使用 EMU 且主要目标是 Copilot agent session
+  prompt/response/tool-call 的合规治理。它应作为专用补充，不应替代普通 audit log
+  管道；是否还要把同类数据送入 Sentinel，应另做官方支持和重复计费评估。
+
+## 20. West US 2 零售价与可复算成本估算
+
+> [!IMPORTANT]
+> 下列数字是架构估算，不是 Azure 实际账单或报价。价格查询日期为 **2026-08-20**，
+> 币种 USD，区域 `westus2`，来源为 Azure Retail Prices API
+> `api-version=2023-01-01-preview`。不含税、汇率、Enterprise Agreement/合作伙伴折扣、
+> 免费试用、Microsoft 365 Defender benefit、Purview/Sentinel 额外许可、网络 egress、
+> 告警/automation 和客户自定义资源。
+
+### 20.1 使用的 Retail API 条目
+
+| 服务 / product / SKU | meter | Retail API 单价 | 单位/免费层 | 本估算用法 |
+|---|---|---:|---|---|
+| Sentinel / Sentinel / Pay-as-you-go | Pay-as-you-go Analysis | $4.30 | 1 GB | simplified PAYG 的 LAW ingestion + Sentinel analysis 合并 meter |
+| Log Analytics / Analytics Logs | Analytics Logs Data Ingestion | $0；之后 $2.30 | 1 GB；tier minimum 0/5 GB | classic/separate 定价参考；不与 $4.30 重复相加 |
+| Log Analytics / Analytics Logs | Analytics Logs Data Retention | $0.10 | 1 GB/month | 仅用于计费包含期之外的额外 retention |
+| Functions / Flex Consumption / On Demand | On Demand Execution Time | $0；之后 $0.000026 | 1 GB-second；每月前 100,000 GB-s | Function 2 GB memory × 执行秒数 |
+| Functions / Flex Consumption / On Demand | On Demand Total Executions | $0；之后 $0.000004 | 10 executions；前 25,000 个计费单位，即 250,000 次 | 等价超额 $0.40/百万次 |
+| Blob Storage / Hot LRS | Hot LRS Data Stored | $0.0184 | 1 GB/month | 当前 flat namespace source/runtime storage |
+| Blob Storage / Hot LRS | Hot LRS Write Operations | $0.05 | 10K | 每 Blob 至少一次 source write |
+| Blob Storage / Hot LRS | Hot Read Operations | $0.004 | 10K | 每 Blob 至少一次 Function read |
+| Event Grid / Standard | Standard Operations | $0；之后 $0.06 | 100K；首个 100K operations | 每 Blob 至少一次 matched/delivered event |
+| ADLS Gen2 HNS / Hot LRS | Hot LRS Data Stored | $0.0180 | 1 GB/month | 仅用于方案 A 定性/替代估算 |
+| ADLS Gen2 HNS / Hot LRS | Hot LRS Write/Read Operations | $0.065 / $0.005 | 各 10K | 方案 A；另有 queue/DLQ operations |
+
+Retail API 的 West US 2 `Log Analytics` 和 `Event Grid` 条目标记
+`isPrimaryMeterRegion=false`，但它们是 API 返回的明确区域 meter；最终合同单价仍以
+Cost Management/账单为准。Functions Flex 和 storage 采用
+`isPrimaryMeterRegion=true` 条目。
+
+**不单独重复计费的项：**
+
+- Logs Ingestion API / Direct DCR 在 Retail API 中没有可识别的独立 ingestion meter；
+  费用体现在目标 LAW/Sentinel 的 billable GB。
+- Application Insights 是 workspace-based，telemetry 进入同一 LAW；本文把它加入总
+  billable ingestion GB，不再列第二份独立 App Insights ingestion。
+- DCR、Workbook 和 Sentinel solution 本身没有在本文模型中识别到固定月费；它们产生
+  的数据/查询/automation 等按对应服务计费。
+
+Live `SecurityInsights(log-copilotauditfgymbaw6iea7g)` solution 当前报告
+`properties.sku.name = Unified`。Microsoft 文档说明 2023-07 之后启用 Sentinel 的
+workspace 默认采用 simplified pricing；本文因此用 $4.30/GB PAYG 做**示例假设**，
+不再叠加 $2.30/GB 的 classic LAW ingestion。是否处于免费试用、commitment tier 或
+企业折扣无法只靠 Retail API 确定，必须在 **Sentinel > Settings > Pricing** 查看
+Current tier，并在 Azure Cost Management 按 resource/meter 核对。
+
+### 20.2 变量与公式
+
+设：
+
+- `R` = 每月写入 source 的原始压缩 Blob GB。
+- `L` = 每月进入 `GitHubCopilotAudit_CL` 的解析后 billable GB。
+- `A` = 每月 Application Insights/其他同 workspace billable telemetry GB。
+- `B` = 每月 Blob 数 = 本模型中的 Event Grid operations = Function executions。
+- `E` = 每次 Function 平均执行秒数；已部署 memory size 为 2 GB。
+- `Dsrc` = source Blob 保留天数；`Dla` = LAW analytics retention。
+
+```text
+SentinelPAYG       = (L + A) * $4.30
+FunctionGBSeconds = 2 GB * E * B
+FunctionCompute   = max(FunctionGBSeconds - 100,000, 0) * $0.000026
+FunctionExec      = max(B - 250,000, 0) * $0.0000004
+SourceSteadyGB    = R * Dsrc / 30
+SourceCapacity    = SourceSteadyGB * $0.0184
+SourceOperations  = (B / 10,000) * ($0.05 write + $0.004 read)
+EventGrid         = max(B - 100,000, 0) / 100,000 * $0.06
+```
+
+Runtime storage 使用独立的固定 POC 假设：平均 1 GB、每月 10K writes 和 10K reads，
+即 `$0.0184 + $0.05 + $0.004 = $0.0724/month`。实际 OneDeploy、host lease、
+diagnostics 和重试操作需以账单替换。
+
+当前表配置 `Analytics / 30 days`，本模型不加 extra retention。Azure Monitor 文档说明
+ingestion 价格至少包含 31 天 Analytics retention；Sentinel 文档对不同表型/门户还说明
+默认 30 天以及部分 Sentinel solution tables 可免费延长到 90 天。自定义
+`GitHubCopilotAudit_CL` 是否享受某项免费延长不能从 Retail API 推断；当 `Dla >`
+当前计费包含期时，应根据门户显示的 table retention meter 重新计算，而不是武断套用
+$0.10。
+
+### 20.3 低/中/高场景
+
+| 变量 | 低 | 中 | 高 |
+|---|---:|---:|---:|
+| 原始压缩 Blob `R` | 10 GB/月 | 100 GB/月 | 1,000 GB/月 |
+| 解析后 audit `L` | 30 GB/月 | 300 GB/月 | 3,000 GB/月 |
+| App Insights `A` | 0.2 GB/月 | 2 GB/月 | 20 GB/月 |
+| Blob / Function executions `B` | 10,000 | 100,000 | 1,000,000 |
+| 逻辑事件数（用于容量观测，不直接计费） | 1,000,000 | 10,000,000 | 100,000,000 |
+| 平均执行 `E` | 2 秒 | 3 秒 | 5 秒 |
+| source retention `Dsrc` | 30 天 | 90 天 | 365 天 |
+| LAW retention `Dla` | 30 天 | 30 天 | 30 天 |
+
+| 成本项 | 低/月 | 中/月 | 高/月 |
+|---|---:|---:|---:|
+| Unified Sentinel PAYG | $129.86 | $1,298.60 | $12,986.00 |
+| Flex compute | $0.00 | $13.00 | $257.40 |
+| Flex executions | $0.00 | $0.00 | $0.30 |
+| Source capacity | $0.184 | $5.52 | $223.87 |
+| Source write/read operations | $0.054 | $0.54 | $5.40 |
+| Runtime storage 假设 | $0.0724 | $0.0724 | $0.0724 |
+| Event Grid | $0.00 | $0.00 | $0.54 |
+| **估算合计/月** | **$130.17** | **$1,317.73** | **$13,473.58** |
+| **估算合计/年** | **$1,562.04** | **$15,812.79** | **$161,682.95** |
+
+高场景 source capacity 使用 `1,000 * 365 / 30 = 12,166.67 GB-month`。场景没有加入
+Event Grid retry、backfill duplicate ingestion、额外 query/alert/automation 或长期
+保留；这些变量都可能显著增加成本。`L/R` 是最敏感的技术变量，因为 full raw JSON、
+规范化列和 chunk row overhead 可能使 LAW billable volume 大于压缩 Blob。
+
+### 20.4 三方案的成本维度
+
+- **HNS + CCF**：可移除本模型的 Function 执行费和专用 runtime storage，但增加 HNS
+  账户、notification/DLQ queue operations 和 CCF 相关存储操作；Sentinel ingestion
+  通常仍是主成本。使用上述 HNS meters 只能估算 storage，不能推断 connector 的最终
+  tenant billing。
+- **当前 Function**：多出 Function/Event Grid/runtime storage，但三个场景显示
+  Sentinel billable GB 远大于这些编排成本。它能通过 Python 控制字段和 chunk，却不能
+  以丢失证据为代价压低 ingestion。
+- **Purview**：Retail API 返回许多通用 Purview Data Security/Data Compliance meters，
+  但没有可可靠映射到 GitHub agent session streaming Public Preview 的独立 meter。
+  不应拿无关 Purview meter 做数字。必须由租户许可管理员/Microsoft 销售确认 preview
+  entitlement、正式 GA 计费、retention/export 和任何 Sentinel 二次 ingestion 费用。
+
+实际成本复盘应每月导出 Cost Management，分别按 Sentinel analysis、Log Analytics
+retention、Functions、Storage 和 Event Grid meter 对照 `R/L/A/B/E/Dsrc/Dla`。如日均
+ingestion 稳定接近 100 GB，再评估 Sentinel commitment tier；Retail API 的 PAYG 示例
+不能替代 commitment tier/EA 报价。
+
+## 21. 官方参考
 
 - GitHub Docs:
   [Streaming the audit log for your enterprise](https://docs.github.com/en/enterprise-cloud@latest/admin/monitoring-activity-in-your-enterprise/reviewing-audit-logs-for-your-enterprise/streaming-the-audit-log-for-your-enterprise)
+- GitHub Changelog:
+  [Copilot agent session streaming is now in public preview (2026-07-02)](https://github.blog/changelog/2026-07-02-copilot-agent-session-streaming-is-now-in-public-preview/)
+- GitHub REST API:
+  [Get Copilot usage records for an enterprise](https://docs.github.com/en/enterprise-cloud@latest/rest/copilot/copilot-usage-metrics?apiVersion=2026-03-10#get-copilot-usage-records-for-an-enterprise)
+- GitHub Docs:
+  [Audit log events for agents](https://docs.github.com/en/enterprise-cloud@latest/copilot/reference/enterprise-administrators/agentic-audit-log-events)
 - Microsoft Learn:
   [System topics in Azure Event Grid](https://learn.microsoft.com/azure/event-grid/system-topics)
 - Microsoft Learn:
@@ -1038,7 +1361,25 @@ az bicep lint --file .\infra\main.bicep
 - Microsoft Learn:
   [Data Collection Rules overview](https://learn.microsoft.com/azure/azure-monitor/data-collection/data-collection-rule-overview)
 - Microsoft Learn:
+  [Set up the Azure Storage connector to stream logs to Microsoft Sentinel](https://learn.microsoft.com/azure/sentinel/setup-azure-storage-connector)
+- Microsoft Learn:
+  [Azure Storage Blob CCF connector reference](https://learn.microsoft.com/azure/sentinel/data-connection-rules-reference-azure-storage)
+- Microsoft Learn:
+  [Troubleshoot Azure Storage Blob connector](https://learn.microsoft.com/azure/sentinel/azure-storage-blob-connector-troubleshoot)
+- Microsoft Learn:
+  [Azure Data Lake Storage Gen2 introduction](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-introduction)
+- Microsoft Learn:
   [Microsoft Sentinel overview](https://learn.microsoft.com/azure/sentinel/overview)
+- Microsoft Learn:
+  [Sentinel simplified pricing](https://learn.microsoft.com/azure/sentinel/enroll-simplified-pricing-tier)
+- Microsoft Learn:
+  [Sentinel pricing and billing](https://learn.microsoft.com/azure/sentinel/billing)
+- Microsoft Learn:
+  [Integrate Microsoft Sentinel and Microsoft Purview](https://learn.microsoft.com/azure/sentinel/purview-solution)
+- Microsoft Learn:
+  [Manage Log Analytics data retention](https://learn.microsoft.com/azure/azure-monitor/logs/data-retention-configure)
+- Azure Retail Prices API:
+  [API overview](https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-retail-prices)
 - Microsoft Learn:
   [Azure Workbooks overview](https://learn.microsoft.com/azure/azure-monitor/visualize/workbooks-overview)
 - Microsoft Learn:
