@@ -983,6 +983,172 @@ GitHubCopilotAudit_CL
 | order by Deliveries desc
 ```
 
+### 12.6 Copilot Usage Records Streaming 开关前后实测对比
+
+以下结果来自已部署 workspace `log-copilotauditfgymbaw6iea7g` 的特定样本窗口。
+`TimeGenerated` 使用 UTC；北京时间为 UTC+8。这里只展示计数、endpoint、action 和
+payload 大小，不查询或披露 `RawEvent`、用户标识或其他敏感字段。
+
+> [!IMPORTANT]
+> 本节的 **logical event** 是唯一 `(EventId, RawContentHash)` 内容版本。
+> **physical row** 是 Log Analytics 中实际观察到的 chunk row。`PayloadBytes` 在同一
+> 逻辑事件的每个 chunk 上重复，因此必须先按逻辑事件取 `max(PayloadBytes)`，再求和。
+> 不要把 `RawChunkIndex == 0` 后的行数直接称为“模型调用”，也不要把 61 个 physical
+> rows 解释成 61 次模型调用。`request` / `response` logical events 是流式协议记录；
+> 是否构成一次用户 prompt 或一次模型调用还需要按产品协议和 request ID 关联。
+
+#### 12.6.1 开启 Usage Records Streaming
+
+样本窗口：`2026-08-19 05:30:00`–`06:00:00 UTC`，即北京时间
+`2026-08-19 13:30:00`–`14:00:00`。
+
+| EventType | Endpoint | Logical events | Physical rows | Payload bytes | Max chunks |
+|---|---|---:|---:|---:|---:|
+| `request` | `/chat/completions` | 7 | 7 | 59,287 | 1 |
+| `request` | `responses-ws` | 3 | 12 | 690,956 | 4 |
+| `response` | `/chat/completions` | 7 | 9 | 221,327 | 3 |
+| `response` | `responses-ws` | 3 | 33 | 1,977,685 | 18 |
+| **合计** |  | **20** | **61** | **2,949,255** | **18** |
+
+20 个 logical events 由 10 个 `request` 和 10 个 `response` records 组成。大 payload
+经过最多 64,000 UTF-8 bytes 的安全分块后，同一 `(EventId, RawContentHash)` 下以
+`RawChunkIndex=0..RawChunkCount-1` 存成多行；因此 20 个 logical events 对应 61 个
+physical rows 是预期结果。最大记录为 `response / responses-ws`，共 18 chunks。
+
+#### 12.6.2 关闭 Usage Records Streaming 与 Usage Records API
+
+样本窗口：`2026-08-19 09:09:00`–`09:12:30 UTC`，即北京时间
+`2026-08-19 17:09:00`–`17:12:30`。
+
+| EventType / action | Logical events | Physical rows | Payload bytes | Max chunks | Endpoint |
+|---|---:|---:|---:|---:|---|
+| `business.sso_response` | 1 | 1 | 693 | 1 | 空 |
+| `copilot.cfb_enterprise_settings_changed` | 2 | 2 | 1,294 | 1 | 空 |
+| `user.login` | 1 | 1 | 635 | 1 | 空 |
+| `user.new_device_used` | 1 | 1 | 637 | 1 | 空 |
+| `user.sign_in_from_unrecognized_device` | 1 | 1 | 662 | 1 | 空 |
+| **合计** | **6** | **6** | **3,921** | **1** | **全部为空** |
+
+两条 `copilot.cfb_enterprise_settings_changed` 分别对应关闭两个企业设置。其余登录/SSO
+记录是普通 GitHub Audit Log。随后在 VS Code 输入合成测试文本“你好”，该窗口没有出现
+`EventType=request` 或 `EventType=response`。这说明普通 Audit Log Streaming 仍正常，
+但 prompt/response/tool payload 不再通过该 Blob stream 流入。
+
+两个 GitHub 开关的职责不同：
+
+- **Copilot Usage Records Streaming** 控制 prompts、responses、tool calls 等会话内容
+  是否持续发送到已配置的 streaming destination；它是 Blob stream 停止出现
+  `request` / `response` 的直接控制项。
+- **Copilot Usage Records API** 控制能否通过 REST API 按需读取最近 48 小时的 usage
+  records。关闭 API 本身不是 Blob streaming 停止的直接原因。本次同时关闭两个开关，
+  但不能把 streaming 行为变化错误归因于 API 开关。
+
+#### 12.6.3 前后对比
+
+| 状态 / 数据类型 | EventType | Endpoint | 样本 payload | 分块 | 能否看到“你好”会话内容 | 适用审计目的 |
+|---|---|---|---:|---|---|---|
+| Streaming 开启：Copilot Usage Records | `request` / `response` | `/chat/completions`、`responses-ws` | 20 logical / 2,949,255 B | 61 rows，最大 18 chunks | 开关允许此类 session payload 流入；本 README 不展示内容 | Copilot prompt/response/tool 调查、AI usage 审计 |
+| Streaming 关闭：Copilot Usage Records | 无 `request` / `response` | 无 | 0 logical | 0 rows | **实测未出现**对应记录 | 验证会话内容 streaming 已关闭 |
+| Streaming 关闭：普通 GitHub Audit Log | 五类 action | 全部为空 | 6 logical / 3,921 B | 6 rows，全部 1 chunk | 不包含该 prompt/response 内容 | 登录、SSO、设备和企业设置变更审计 |
+
+> [!NOTE]
+> 这是两个短时间窗口的实测样本，不是吞吐、延迟、模型调用量或 Azure 计费基准。
+> 客户端重试、Event Grid 至少一次投递、协议变化和不同 prompt 大小都会改变 logical /
+> physical 比例及 payload volume。
+
+#### 12.6.4 KQL：先形成逻辑事件，再按类型和 endpoint 汇总
+
+`PhysicalRows` 保留窗口内实际 row 数；`LogicalEvents` 已按
+`EventId + RawContentHash` 去重。至少一次重投时 logical count 不会增加，但
+`PhysicalRows` 会显示额外 delivery/chunk rows，便于发现重试。
+
+```kusto
+let StartUtc = datetime(2026-08-19 05:30:00Z);
+let EndUtc = datetime(2026-08-19 06:00:00Z);
+let LogicalEvents = materialize(
+    GitHubCopilotAudit_CL
+    | where TimeGenerated >= StartUtc and TimeGenerated < EndUtc
+    | extend ContentHash=coalesce(RawContentHash, "legacy"),
+             ChunkCount=coalesce(RawChunkCount, 1)
+    | summarize PhysicalRows=count(),
+                PayloadBytes=max(PayloadBytes),
+                MaxChunks=max(ChunkCount),
+                LatestIngestedAt=max(IngestedAt)
+      by EventId, ContentHash, EventType, Endpoint
+);
+LogicalEvents
+| summarize LogicalEvents=count(),
+            PhysicalRows=sum(PhysicalRows),
+            PayloadBytes=sum(PayloadBytes),
+            MaxChunks=max(MaxChunks)
+  by EventType, Endpoint
+| order by EventType asc, Endpoint asc
+```
+
+如要把重复 delivery 的相同 chunk 也折叠掉，在第一层前先按
+`(EventId, RawContentHash, RawChunkIndex)` 使用 `arg_max(IngestedAt, *)`，再按
+`(EventId, RawContentHash)` 汇总。证据完整性仍应使用 12.2 节的 exact-set 检查。
+
+#### 12.6.5 KQL：关闭后检查是否仍有 request/response
+
+返回 `SessionLogicalEvents=0` 才符合本次关闭后的样本结果。生产告警应考虑设置传播和
+pipeline 延迟，不应只用三分半窗口作为永久阈值。
+
+```kusto
+let StartUtc = datetime(2026-08-19 09:09:00Z);
+let EndUtc = datetime(2026-08-19 09:12:30Z);
+let WindowRows = materialize(
+    GitHubCopilotAudit_CL
+    | where TimeGenerated >= StartUtc and TimeGenerated < EndUtc
+);
+let SessionLogicalEvents = materialize(
+    WindowRows
+    | where EventType in ("request", "response")
+    | summarize PhysicalRows=count(),
+                PayloadBytes=max(PayloadBytes),
+                MaxChunks=max(coalesce(RawChunkCount, 1))
+      by EventId, RawContentHash, EventType, Endpoint
+);
+SessionLogicalEvents
+| summarize SessionLogicalEvents=count(),
+            PhysicalRows=sum(PhysicalRows),
+            PayloadBytes=sum(PayloadBytes),
+            MaxChunks=coalesce(max(MaxChunks), 0)
+| extend Status=iff(SessionLogicalEvents == 0, "no usage records observed", "investigate")
+```
+
+#### 12.6.6 KQL：分类普通 Audit Log 与 Usage Records
+
+GitHub usage stream 当前以 `request` / `response` 标识会话协议记录；其他 action 归为
+普通 GitHub Audit Log。查询先形成逻辑事件，因此不会把 chunks 当作独立活动。
+
+```kusto
+let StartUtc = datetime(2026-08-19 05:30:00Z);
+let EndUtc = datetime(2026-08-19 09:12:30Z);
+let LogicalEvents = materialize(
+    GitHubCopilotAudit_CL
+    | where TimeGenerated >= StartUtc and TimeGenerated < EndUtc
+    | summarize PhysicalRows=count(),
+                PayloadBytes=max(PayloadBytes),
+                MaxChunks=max(coalesce(RawChunkCount, 1))
+      by EventId, RawContentHash, EventType, Endpoint
+    | extend RecordClass=iff(
+          EventType in ("request", "response"),
+          "Copilot Usage Records",
+          "GitHub Audit Log"
+      )
+);
+LogicalEvents
+| summarize LogicalEvents=count(),
+            PhysicalRows=sum(PhysicalRows),
+            PayloadBytes=sum(PayloadBytes),
+            MaxChunks=max(MaxChunks),
+            EventTypes=make_set(EventType, 100),
+            Endpoints=make_set_if(Endpoint, isnotempty(Endpoint), 100)
+  by RecordClass
+| order by RecordClass asc
+```
+
 ## 13. Workbook 与日常运维
 
 在 Azure Portal 中打开：
